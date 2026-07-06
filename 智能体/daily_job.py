@@ -71,6 +71,14 @@ def main():
         for err in result["errors"]:
             logger.warning("分析失败：%s", err)
 
+    from feishu_notify import notify_daily_job_result
+
+    log_path = os.path.join(_LOG_DIR, "daily_job.log")
+    if notify_daily_job_result(result, log_path=log_path):
+        print("飞书通知已发送")
+    else:
+        print("飞书通知未发送（未配置 Webhook 或发送失败，详见日志）")
+
 
 if __name__ == "__main__":
     main()
