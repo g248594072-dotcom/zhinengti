@@ -1,0 +1,9 @@
+{
+  "base_url": "https://api.deepseek.com",
+  "model": "deepseek-v4-pro",
+  "models": ["deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"],
+  "api_key": "YOUR_API_KEY_HERE",
+  "concurrency": 24,
+  "max_chars": 16000,
+  "app_password": ""
+}
