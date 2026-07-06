@@ -5,5 +5,8 @@
   "api_key": "YOUR_API_KEY_HERE",
   "concurrency": 24,
   "max_chars": 16000,
-  "app_password": ""
+  "app_password": "",
+  "deal_context_enabled": true,
+  "deal_context_limit": 5,
+  "deal_context_prefer_today": true
 }

@@ -474,6 +474,21 @@ def _render_qc_tab(cfg):
             "开启后将在标准质检结束后，对符合条件的客户基于**完整聊天记录**做全面复盘："
             "卡点、不付款原因、顾虑、心理、下一步动作等（不受当天/自定义时间窗口截断）。"
         )
+    enable_deal_context = st.toggle(
+        "注入成交经验参考（从数据库检索相似已成交案例，辅助质检判断）",
+        value=bool(cfg.get("deal_context_enabled", True)),
+        key="enable_deal_context",
+    )
+    if enable_deal_context:
+        st.caption(
+            "按客户阶段/顾虑/话术匹配 3～5 条历史成交复盘，写入 prompt「参考案例」区；"
+            "报告会显示「成交参考案例数/摘要」。"
+        )
+    run_ab_validation = st.checkbox(
+        "效果验证：首通会话对比「有/无成交参考」两次质检（多耗 1 次 API）",
+        value=False,
+        key="run_ab_validation",
+    )
     start = st.button("开始质检", type="primary", use_container_width=False)
 
     if start:
@@ -570,13 +585,32 @@ def _render_qc_tab(cfg):
 
         with st.spinner("正在质检，请稍候…"):
             try:
+                qc_cfg = dict(cfg)
+                qc_cfg["deal_context_enabled"] = enable_deal_context
                 timing_raw = {}
                 results = core.run_qc_batch(
-                    sessions, cfg, on_progress=on_progress, timing_out=timing_raw
+                    sessions, qc_cfg, on_progress=on_progress, timing_out=timing_raw
                 )
             except Exception as e:
                 st.error(f"质检过程异常：{core.redact_secrets(str(e), cfg)}")
                 return
+
+        if run_ab_validation and sessions:
+            with st.expander("效果验证：有/无成交参考对比（首通）", expanded=True):
+                try:
+                    ab = core.compare_qc_deal_context(qc_cfg, sessions[0])
+                    st.caption(
+                        f"参考案例：{ab.get('deal_ref_summary') or '无'} · "
+                        f"档位：{ab.get('tier', '')}"
+                    )
+                    diffs = ab.get("diffs") or []
+                    if not diffs:
+                        st.success("两次质检关键字段一致。")
+                    else:
+                        st.warning(f"有 {len(diffs)} 个字段不同：")
+                        st.dataframe(diffs, use_container_width=True)
+                except Exception as e:
+                    st.error(f"对比失败：{core.redact_secrets(str(e), cfg)}")
 
         progress.progress(1.0, text="常规质检完成")
         stats = core.compute_stats(results)

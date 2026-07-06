@@ -62,6 +62,7 @@ def analyze_unlearned_deals(cfg: dict, limit: int = 20) -> dict:
     success = 0
     failed = 0
     errors = []
+    learned_items = []
 
     for cust in customers:
         result = analyze_deal_customer(cust, cfg)
@@ -71,6 +72,15 @@ def analyze_unlearned_deals(cfg: dict, limit: int = 20) -> dict:
             errors.append(f"{name}: {result['_错误']}")
         else:
             success += 1
+            name = cust.get("contact_name") or cust.get("original_session_id")
+            rule = (result.get("智能体判断规则") or result.get("recommended_agent_rules") or "").strip()
+            if rule:
+                learned_items.append({
+                    "contact_name": name,
+                    "main_objection": result.get("主要顾虑") or result.get("main_objection") or "",
+                    "recommended_agent_rules": rule,
+                })
+                logger.info("成交学习 · %s · 智能体规则：%s", name, rule[:200])
 
     summary = f"待分析 {total}，成功 {success}，失败 {failed}"
     if errors:
@@ -92,4 +102,5 @@ def analyze_unlearned_deals(cfg: dict, limit: int = 20) -> dict:
         "success": success,
         "failed": failed,
         "errors": errors,
+        "learned_items": learned_items,
     }

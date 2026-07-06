@@ -8,11 +8,14 @@ import sys
 import json
 import re
 import time
+import logging
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import requests
+
+logger = logging.getLogger(__name__)
 
 # ============================================================
 # Prompt 加载
@@ -51,6 +54,20 @@ def load_prompt(filename):
         f"无法加载 Prompt「{filename}」。\n已尝试路径：\n{tried}\n\n"
         f"请确认「prompts」文件夹与程序在同一目录。"
     )
+
+
+def enrich_system_prompt(base: str, tier: str = "full") -> str:
+    """合并已审核的成交复盘规则补充（prompts/deal_learned_supplement.md）。"""
+    if tier in ("deep_review", "progress_compare"):
+        return base
+    try:
+        sup = load_prompt("deal_learned_supplement.md")
+    except FileNotFoundError:
+        return base
+    sup = re.sub(r"<!--[\s\S]*?-->", "", sup or "").strip()
+    if not sup:
+        return base
+    return base + "\n\n# 成交复盘沉淀规则（已审核合并）\n" + sup
 
 
 # ============================================================
@@ -97,6 +114,7 @@ REPORT_COLUMNS = [
     "顾虑_效果", "顾虑_信任", "顾虑_价格", "顾虑_拖延", "顾虑_COD",
     "客户心理轨迹", "沉默与激活", "逼单跟单",
     "主要问题", "改进建议", "下一步跟进动作",
+    "成交参考案例数", "成交参考摘要",
     "_错误", "原始对话",
 ]
 
@@ -1384,9 +1402,9 @@ def call_llm_prompt(cfg, system_prompt, user_prompt, max_chars=None):
     return {"_错误": redact_secrets(last_err or "未知错误", cfg)}
 
 
-def call_llm(cfg, dialog_text, tier="full", note=None):
+def call_llm(cfg, dialog_text, tier="full", note=None, deal_reference=None):
     if tier == "light":
-        system_prompt = load_prompt("lite_qc.md")
+        system_prompt = enrich_system_prompt(load_prompt("lite_qc.md"), tier)
         max_chars = LITE_MAX_CHARS
         user_tail = "请按标准质检以下整通会话，只输出 JSON：\n\n"
     elif tier == "deep_review":
@@ -1399,13 +1417,18 @@ def call_llm(cfg, dialog_text, tier="full", note=None):
         # 调用方已把两次快照与新增对话拼好为完整载荷，这里不再额外加引导句。
         user_tail = ""
     else:
-        system_prompt = load_prompt("full_qc.md")
+        system_prompt = enrich_system_prompt(load_prompt("full_qc.md"), tier)
         max_chars = cfg["max_chars"]
         user_tail = "请按标准质检以下整通会话，只输出 JSON：\n\n"
 
     text = _truncate_dialog_for_llm(dialog_text, max_chars)
-    prefix = (note + "\n\n") if note else ""
-    user_msg = prefix + user_tail + text
+    prefix_parts = []
+    if deal_reference:
+        prefix_parts.append(deal_reference.strip())
+    if note:
+        prefix_parts.append(note.strip())
+    prefix = "\n\n".join(prefix_parts)
+    user_msg = (prefix + "\n\n" if prefix else "") + user_tail + text
     url = cfg["base_url"].rstrip("/") + "/chat/completions"
     headers = {
         "Authorization": "Bearer " + cfg["api_key"],
@@ -1484,7 +1507,24 @@ _FULL_HISTORY_NOTE = (
 )
 
 
-def qc_one_session(cfg, session):
+def _resolve_deal_context(cfg, dialog: str, use_deal_context: bool | None) -> tuple[str, list, str, str]:
+    """返回 (reference_note, deals, count_label, summary)。"""
+    enabled = cfg.get("deal_context_enabled", True) if use_deal_context is None else bool(use_deal_context)
+    if not enabled:
+        return "", [], ""
+    try:
+        from deal_context import get_deal_context_for_qc, summarize_deal_refs
+
+        note, deals = get_deal_context_for_qc(dialog, cfg)
+        summary = summarize_deal_refs(deals)
+        count = str(len(deals)) if deals else ""
+        return note, deals, count, summary
+    except Exception as e:
+        logger.warning("成交经验检索失败: %s", e)
+        return "", [], "", ""
+
+
+def qc_one_session(cfg, session, *, use_deal_context=None):
     """质检单通会话，异常不向外抛出。"""
     cust, serv = count_roles(session["对话"])
     tier = classify_tier(cust)
@@ -1497,19 +1537,36 @@ def qc_one_session(cfg, session):
         "客服发言数": serv,
         "质检档位": TIER_LABEL[tier],
         "原始对话": session["对话"],
+        "成交参考案例数": "",
+        "成交参考摘要": "",
     }
     if tier == "skip":
         row["结果标签"] = "规则筛选"
         row.update(analyze_low_intent_frequency(session["对话"]))
         return row, tier
     try:
-        res = call_llm(cfg, session["对话"], tier=tier)
+        deal_ref, _deals, ref_count, ref_summary = _resolve_deal_context(
+            cfg, session["对话"], use_deal_context
+        )
+        row["成交参考案例数"] = ref_count
+        row["成交参考摘要"] = ref_summary
+
+        res = call_llm(cfg, session["对话"], tier=tier, deal_reference=deal_ref or None)
         full_dialog = session.get("对话_全量")
         if (full_dialog and full_dialog.strip() != (session["对话"] or "").strip()
                 and _suspect_missing_opening(res)):
-            res_full = call_llm(cfg, full_dialog, tier="full", note=_FULL_HISTORY_NOTE)
+            full_ref, _, full_count, full_summary = _resolve_deal_context(
+                cfg, full_dialog, use_deal_context
+            )
+            res_full = call_llm(
+                cfg, full_dialog, tier="full",
+                note=_FULL_HISTORY_NOTE,
+                deal_reference=full_ref or None,
+            )
             if isinstance(res_full, dict) and "_错误" not in res_full:
                 res = res_full
+                row["成交参考案例数"] = full_count or ref_count
+                row["成交参考摘要"] = full_summary or ref_summary
                 res["改进建议"] = ("【已结合完整历史复核】 " + str(res.get("改进建议", ""))).strip()
         for k, v in res.items():
             val = v if not isinstance(v, (dict, list)) else json.dumps(v, ensure_ascii=False)
@@ -1519,6 +1576,21 @@ def qc_one_session(cfg, session):
     except Exception as e:
         row["_错误"] = redact_secrets(str(e), cfg)
     return row, tier
+
+
+def compare_qc_deal_context(cfg, session) -> dict:
+    """效果验证：同一通会话分别做「有/无成交经验参考」质检并对比差异。"""
+    row_with, tier = qc_one_session(cfg, session, use_deal_context=True)
+    row_without, _ = qc_one_session(cfg, session, use_deal_context=False)
+    from deal_context import diff_qc_rows
+
+    return {
+        "tier": tier,
+        "with_context": row_with,
+        "without_context": row_without,
+        "diffs": diff_qc_rows(row_with, row_without),
+        "deal_ref_summary": row_with.get("成交参考摘要", ""),
+    }
 
 
 def get_session_full_dialog(session):

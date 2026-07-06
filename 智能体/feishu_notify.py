@@ -91,6 +91,7 @@ def build_daily_job_report(
     success = int(result.get("success") or 0)
     failed = int(result.get("failed") or 0)
     errors = result.get("errors") or []
+    learned = result.get("learned_items") or []
 
     lines = [
         "【成交客户每日学习报告】",
@@ -99,6 +100,22 @@ def build_daily_job_report(
         f"成功：{success}",
         f"失败：{failed}",
     ]
+
+    if learned:
+        lines.append("")
+        lines.append("今日新增智能体判断规则：")
+        for item in learned[:8]:
+            name = item.get("contact_name") or "?"
+            rule = (item.get("recommended_agent_rules") or "").strip()
+            obj = (item.get("main_objection") or "").strip()
+            head = f"· {name}"
+            if obj:
+                head += f"（{obj[:40]}）"
+            lines.append(head)
+            if rule:
+                lines.append(f"  {rule[:280]}")
+        if len(learned) > 8:
+            lines.append(f"… 另有 {len(learned) - 8} 条未展示")
 
     if errors:
         lines.append("")

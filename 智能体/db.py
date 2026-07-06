@@ -1000,6 +1000,38 @@ def save_deal_analysis(customer_id: int, session_id: int | None, analysis: dict)
         )
 
 
+def list_deal_analyses(limit: int = 200, since_date: datetime | None = None) -> list[dict]:
+    """列出成交心理分析记录（含客户信息），供质检参考检索。"""
+    init_db()
+    engine = get_engine()
+    sql = """
+        SELECT da.*,
+               c.contact_name,
+               c.original_session_id,
+               c.sales_name,
+               c.status AS customer_status
+        FROM deal_analysis da
+        JOIN customers c ON c.id = da.customer_id
+        WHERE 1=1
+    """
+    params: dict[str, Any] = {"lim": int(limit)}
+    if since_date is not None:
+        sql += " AND da.analyzed_at >= :since"
+        params["since"] = since_date
+    sql += " ORDER BY da.analyzed_at DESC LIMIT :lim"
+    with engine.connect() as conn:
+        rows = conn.execute(text(sql), params).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
+def list_deal_analyses_since_days(days: int = 7, limit: int = 500) -> list[dict]:
+    """最近 N 天内新增的成交分析。"""
+    from datetime import timedelta
+
+    since = datetime.now() - timedelta(days=max(1, int(days)))
+    return list_deal_analyses(limit=limit, since_date=since)
+
+
 def save_daily_learning_run(
     run_date,
     new_deal_customers: int,

@@ -354,5 +354,64 @@ class TestQcTierBatching(unittest.TestCase):
         )
 
 
+class TestDealContext(unittest.TestCase):
+    def test_infer_dialog_signals_price_concern(self):
+        from deal_context import infer_dialog_signals
+
+        dialog = (
+            '客户 : "How much does it cost? AUD 400 is expensive"\n'
+            '乐乐 : "Let me explain the plan"\n'
+        )
+        sig = infer_dialog_signals(dialog)
+        self.assertIn("价格", sig["concerns"])
+
+    def test_score_deal_relevance_objection_match(self):
+        from deal_context import infer_dialog_signals, score_deal_relevance
+
+        dialog = '客户 : "Is this a scam? I need proof"\n'
+        signals = infer_dialog_signals(dialog)
+        deal = {
+            "main_objection": "客户主要顾虑是信任，担心被骗",
+            "customer_profile": "澳洲中老年男性",
+            "deal_stage_summary": "进线后逐步建立信任",
+            "customer_psychology_path": "",
+            "recommended_agent_rules": "先给资质再讲方案",
+            "reusable_sales_experience": "",
+            "analyzed_at": None,
+        }
+        score = score_deal_relevance(dialog, signals, deal)
+        self.assertGreater(score, 2.0)
+
+    def test_build_deal_reference_note(self):
+        from deal_context import build_deal_reference_note
+
+        note = build_deal_reference_note([{
+            "contact_name": "Tom",
+            "_match_reason": "顾虑≈价格",
+            "recommended_agent_rules": "报价前先确认症状",
+            "reusable_sales_experience": "分条报价",
+        }])
+        self.assertIn("参考成交案例", note)
+        self.assertIn("Tom", note)
+        self.assertIn("智能体判断规则", note)
+
+    def test_diff_qc_rows(self):
+        from deal_context import diff_qc_rows
+
+        diffs = diff_qc_rows(
+            {"是否合格": "合格", "主要问题": "无"},
+            {"是否合格": "不合格", "主要问题": "报价不完整"},
+        )
+        self.assertEqual(len(diffs), 2)
+        self.assertEqual(diffs[0]["字段"], "是否合格")
+
+
+class TestEnrichSystemPrompt(unittest.TestCase):
+    def test_enrich_skips_empty_supplement(self):
+        base = "# 基础 prompt"
+        out = core.enrich_system_prompt(base, "full")
+        self.assertEqual(out, base)
+
+
 if __name__ == "__main__":
     unittest.main()
