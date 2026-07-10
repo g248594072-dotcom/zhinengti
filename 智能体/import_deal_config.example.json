@@ -1,0 +1,18 @@
+{
+  "_说明": "复制本文件为 import_deal_config.json 后修改。import_deal_config.json 不会提交到 Git。",
+
+  "数据库说明": "MySQL 连接账号密码在 .env；此处填写导入目标库名（须与 .env 里 MYSQL_DATABASE 一致）",
+  "mysql_database": "customer_ai",
+
+  "导入说明": "成交客户导入到上述数据库的 customers / chat_sessions / chat_messages 表，并标记 status=已成交",
+
+  "default_analyze_limit": 20,
+  "import_last_dir": "",
+
+  "salesmartly": {
+    "_说明": "SaleSmartly API Token / 项目 ID 放在同目录 api-key.json（见 api-key.json.example）",
+    "deal_tag_keywords": ["全款", "定金", "分期"],
+    "date_label_category": "澳大利亚",
+    "date_label_name": "日期"
+  }
+}

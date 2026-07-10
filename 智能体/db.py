@@ -11,8 +11,9 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable, TypeVar
 
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
@@ -29,6 +30,13 @@ _ENV_PATH = os.path.join(_APP_DIR, ".env")
 _SESSION_ID_KEYS = ("会话ID", "会话id", "session_id", "sessionId", "Session ID", "会话编号")
 
 _ENGINE: Engine | None = None
+_DB_READY = False
+
+_TRANSIENT_MYSQL_CODES = frozenset({2003, 2006, 2013, 2055})
+_DB_RETRY_ATTEMPTS = 3
+_DB_RETRY_BASE_DELAY = 1.5
+
+T = TypeVar("T")
 
 _DEAL_SIGNALS = (
     "成交", "已付款", "已支付", "已下单", "付款完成", "支付完成", "已付",
@@ -223,6 +231,57 @@ def _mysql_url() -> str:
     )
 
 
+def _is_transient_db_error(exc: BaseException) -> bool:
+    """判断是否为可重试的 MySQL 连接类错误。"""
+    if isinstance(exc, OSError):
+        return True
+    orig = getattr(exc, "orig", exc)
+    args = getattr(orig, "args", ())
+    if args and isinstance(args[0], int):
+        return args[0] in _TRANSIENT_MYSQL_CODES
+    msg = str(exc).lower()
+    return (
+        "lost connection" in msg
+        or "can't connect" in msg
+        or "connection refused" in msg
+        or "server has gone away" in msg
+    )
+
+
+def reset_engine() -> None:
+    """丢弃连接池（连接断开时用于重建）。"""
+    global _ENGINE
+    if _ENGINE is not None:
+        try:
+            _ENGINE.dispose()
+        except Exception:
+            logger.exception("dispose engine failed")
+        _ENGINE = None
+
+
+def with_db_retry(fn: Callable[..., T], *args, **kwargs) -> T:
+    """对短暂断连执行有限次重试。"""
+    last_exc: BaseException | None = None
+    for attempt in range(1, _DB_RETRY_ATTEMPTS + 1):
+        try:
+            return fn(*args, **kwargs)
+        except (SQLAlchemyError, OSError) as e:
+            last_exc = e
+            if not _is_transient_db_error(e) or attempt >= _DB_RETRY_ATTEMPTS:
+                raise
+            logger.warning(
+                "MySQL 短暂断连，%s/%s 秒后重试：%s",
+                attempt,
+                _DB_RETRY_ATTEMPTS,
+                e,
+            )
+            reset_engine()
+            time.sleep(_DB_RETRY_BASE_DELAY * attempt)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("with_db_retry: unexpected state")
+
+
 def get_engine() -> Engine:
     global _ENGINE
     if _ENGINE is None:
@@ -230,7 +289,14 @@ def get_engine() -> Engine:
             _ENGINE = create_engine(
                 _mysql_url(),
                 pool_pre_ping=True,
-                pool_recycle=3600,
+                pool_recycle=1800,
+                pool_size=5,
+                max_overflow=10,
+                connect_args={
+                    "connect_timeout": 30,
+                    "read_timeout": 120,
+                    "write_timeout": 120,
+                },
                 json_serializer=lambda obj: json.dumps(obj, ensure_ascii=False),
             )
         except Exception as e:
@@ -239,11 +305,19 @@ def get_engine() -> Engine:
 
 
 def init_db() -> None:
-    """自动创建全部业务表。"""
-    engine = get_engine()
-    with engine.begin() as conn:
-        for ddl in _CREATE_TABLES_SQL:
-            conn.execute(text(ddl))
+    """自动创建全部业务表（进程内只执行一次 DDL）。"""
+    global _DB_READY
+    if _DB_READY:
+        return
+
+    def _run() -> None:
+        engine = get_engine()
+        with engine.begin() as conn:
+            for ddl in _CREATE_TABLES_SQL:
+                conn.execute(text(ddl))
+
+    with_db_retry(_run)
+    _DB_READY = True
 
 
 # ---------------------------------------------------------------------------
@@ -343,8 +417,12 @@ def get_or_create_customer_by_session_id(session: dict) -> dict:
 
     with engine.begin() as conn:
         row = conn.execute(
-            text("SELECT * FROM customers WHERE original_session_id = :sid LIMIT 1"),
-            {"sid": original_session_id},
+            text("""
+                SELECT * FROM customers
+                WHERE original_session_id = :sid OR external_customer_key = :key
+                LIMIT 1
+            """),
+            {"sid": original_session_id, "key": customer_key},
         ).fetchone()
         if row:
             d = _row_to_dict(row)
@@ -357,7 +435,7 @@ def get_or_create_customer_by_session_id(session: dict) -> dict:
 
         conn.execute(
             text("""
-                INSERT INTO customers (
+                INSERT IGNORE INTO customers (
                     external_customer_key, original_session_id,
                     contact_name, channel, sales_name, status
                 ) VALUES (
@@ -373,8 +451,12 @@ def get_or_create_customer_by_session_id(session: dict) -> dict:
             },
         )
         row = conn.execute(
-            text("SELECT * FROM customers WHERE original_session_id = :sid LIMIT 1"),
-            {"sid": original_session_id},
+            text("""
+                SELECT * FROM customers
+                WHERE original_session_id = :sid OR external_customer_key = :key
+                LIMIT 1
+            """),
+            {"sid": original_session_id, "key": customer_key},
         ).fetchone()
         d = _row_to_dict(row)
         d["created"] = True
@@ -392,8 +474,12 @@ def get_or_create_chat_session(
 
     with engine.begin() as conn:
         row = conn.execute(
-            text("SELECT * FROM chat_sessions WHERE original_session_id = :sid LIMIT 1"),
-            {"sid": original_session_id},
+            text("""
+                SELECT * FROM chat_sessions
+                WHERE original_session_id = :sid OR session_key = :skey
+                LIMIT 1
+            """),
+            {"sid": original_session_id, "skey": session_key},
         ).fetchone()
         if row:
             d = _row_to_dict(row)
@@ -407,7 +493,7 @@ def get_or_create_chat_session(
 
         conn.execute(
             text("""
-                INSERT INTO chat_sessions (
+                INSERT IGNORE INTO chat_sessions (
                     session_key, customer_id, source_file, original_session_id,
                     contact_name, sales_name, channel, raw_dialog
                 ) VALUES (
@@ -426,46 +512,58 @@ def get_or_create_chat_session(
             },
         )
         row = conn.execute(
-            text("SELECT * FROM chat_sessions WHERE original_session_id = :sid LIMIT 1"),
-            {"sid": original_session_id},
+            text("""
+                SELECT * FROM chat_sessions
+                WHERE original_session_id = :sid OR session_key = :skey
+                LIMIT 1
+            """),
+            {"sid": original_session_id, "skey": session_key},
         ).fetchone()
         d = _row_to_dict(row)
         d["created"] = True
         return d
 
 
-def get_last_message(session_db_id: int) -> dict | None:
+def get_session_messages(session_db_id: int) -> list[dict]:
     engine = get_engine()
     with engine.connect() as conn:
-        row = conn.execute(
+        rows = conn.execute(
             text("""
                 SELECT * FROM chat_messages
                 WHERE session_id = :sid
-                ORDER BY message_order DESC
-                LIMIT 1
+                ORDER BY message_order ASC
             """),
             {"sid": session_db_id},
-        ).fetchone()
-        return _row_to_dict(row)
+        ).fetchall()
+        return [_row_to_dict(r) for r in rows]
 
 
-def find_last_message_position(new_messages: list[dict], last_db_message: dict) -> int:
-    last_content = normalize_text(last_db_message.get("content"))
-    last_sender = normalize_text(last_db_message.get("sender_name"))
+def get_last_message(session_db_id: int) -> dict | None:
+    messages = get_session_messages(session_db_id)
+    return messages[-1] if messages else None
 
-    for i in range(len(new_messages) - 1, -1, -1):
-        msg = new_messages[i]
+
+def find_message_position_in_list(messages: list[dict], target_message: dict) -> int:
+    target_content = normalize_text(target_message.get("content"))
+    target_sender = normalize_text(target_message.get("sender_name"))
+
+    for i in range(len(messages) - 1, -1, -1):
+        msg = messages[i]
         msg_content = normalize_text(msg.get("content"))
         msg_sender = normalize_text(msg.get("sender_name"))
 
         if not msg_content:
             continue
 
-        if msg_content == last_content:
-            if not last_sender or not msg_sender or last_sender == msg_sender:
+        if msg_content == target_content:
+            if not target_sender or not msg_sender or target_sender == msg_sender:
                 return i
 
     return -1
+
+
+def find_last_message_position(new_messages: list[dict], last_db_message: dict) -> int:
+    return find_message_position_in_list(new_messages, last_db_message)
 
 
 def record_import_conflict(
@@ -591,48 +689,58 @@ def append_new_messages_by_last_line(
     session: dict | None = None,
     raw_dialog: str | None = None,
 ) -> dict:
+    """
+    按会话增量合并聊天，仅追加新记录中多出来的消息：
+    1. 老记录最后一条在新记录中 → 追加其后新增部分
+    2. 新记录最后一条在老记录中 → 跳过
+    3. 两边最后一条对不上 → 跳过
+    """
     if not new_messages:
-        return {"inserted_messages": 0, "conflict": False, "reason": "聊天记录为空"}
+        return {"inserted_messages": 0, "skipped": False, "reason": "聊天记录为空"}
 
-    last_db_message = get_last_message(session_db_id)
-    engine = get_engine()
+    db_messages = get_session_messages(session_db_id)
+    last_db_message = db_messages[-1] if db_messages else None
+    new_last_message = new_messages[-1]
 
-    if last_db_message is None:
-        start_order = 0
-        tail = new_messages
-    else:
-        position = find_last_message_position(new_messages, last_db_message)
-        if position == -1:
-            preview = "\n".join(m.get("raw_line", "") for m in new_messages[:5])
-            record_import_conflict(
-                original_session_id=original_session_id,
-                customer_id=customer_id,
-                session_id=session_db_id,
-                source_file=source_file,
-                last_db_message=last_db_message,
-                new_dialog_preview=preview,
-                reason="数据库最后一句话在新导入聊天中找不到",
-            )
+    if last_db_message is not None:
+        if find_message_position_in_list(db_messages, new_last_message) >= 0:
             return {
                 "inserted_messages": 0,
-                "conflict": True,
-                "reason": "数据库最后一句话在新导入聊天中找不到",
+                "skipped": True,
+                "reason": "新记录最后一条已在老记录中，已跳过",
             }
-        tail = new_messages[position + 1:]
+
+        anchor = find_message_position_in_list(new_messages, last_db_message)
+        if anchor == -1:
+            return {
+                "inserted_messages": 0,
+                "skipped": True,
+                "reason": "两边最后一条对不上，已跳过",
+            }
+
+        tail = new_messages[anchor + 1:]
         if not tail:
-            return {"inserted_messages": 0, "conflict": False, "reason": "无新增聊天"}
+            return {
+                "inserted_messages": 0,
+                "skipped": True,
+                "reason": "无新增聊天",
+            }
         start_order = last_db_message["message_order"]
+    else:
+        tail = new_messages
+        start_order = 0
 
     inserted = 0
+    engine = get_engine()
     with engine.begin() as conn:
         for offset, msg in enumerate(tail, start=1):
             message_order = start_order + offset
             mkey = make_message_key(
                 session_key, message_order, msg.get("sender_name"), msg.get("content"),
             )
-            conn.execute(
+            result = conn.execute(
                 text("""
-                    INSERT INTO chat_messages (
+                    INSERT IGNORE INTO chat_messages (
                         message_key, customer_id, session_id, message_order,
                         sender_type, sender_name, content, sent_at, raw_line
                     ) VALUES (
@@ -651,19 +759,20 @@ def append_new_messages_by_last_line(
                     "raw": msg.get("raw_line"),
                 },
             )
-            inserted += 1
+            if result.rowcount:
+                inserted += 1
 
-        if session and raw_dialog is not None:
+        if inserted and session and raw_dialog is not None:
             _update_session_and_customer_stats(
                 conn, customer_id, session_db_id, session, raw_dialog,
             )
-        elif source_file:
+        elif inserted and source_file:
             conn.execute(
                 text("UPDATE chat_sessions SET source_file = :src WHERE id = :sid"),
                 {"src": source_file, "sid": session_db_id},
             )
 
-    return {"inserted_messages": inserted, "conflict": False, "reason": ""}
+    return {"inserted_messages": inserted, "skipped": False, "reason": ""}
 
 
 def upsert_sessions(sessions: list[dict], source_file: str | None = None) -> dict:
@@ -680,6 +789,7 @@ def upsert_sessions(sessions: list[dict], source_file: str | None = None) -> dic
         "conflict_session_ids": [],
         "skipped_no_session_id": 0,
         "errors": [],
+        "session_details": [],
     }
 
     for session in sessions:
@@ -687,7 +797,16 @@ def upsert_sessions(sessions: list[dict], source_file: str | None = None) -> dic
             original_session_id = normalize_session_id(session)
         except ValueError as e:
             result["skipped_no_session_id"] += 1
-            result["errors"].append(str(e))
+            err_msg = str(e)
+            result["errors"].append(err_msg)
+            result["session_details"].append({
+                "session_id": session.get("会话ID") or "",
+                "contact_name": session.get("联系人") or "",
+                "source_file": source_file or "",
+                "status": "失败",
+                "reason": err_msg,
+                "messages_inserted": 0,
+            })
             continue
 
         try:
@@ -723,18 +842,54 @@ def upsert_sessions(sessions: list[dict], source_file: str | None = None) -> dic
             inserted = append_result.get("inserted_messages", 0)
             result["messages_inserted"] += inserted
 
-            if append_result.get("conflict"):
-                result["conflicts"] += 1
-                result["conflict_session_ids"].append(original_session_id)
-            elif append_result.get("reason") == "无新增聊天":
+            detail = {
+                "session_id": original_session_id,
+                "contact_name": session.get("联系人") or "",
+                "source_file": source_file or "",
+                "status": "成功",
+                "reason": "",
+                "messages_inserted": inserted,
+                "is_new_customer": bool(customer.get("created")),
+                "is_new_session": bool(chat_sess.get("created")),
+            }
+            skip_reason = append_result.get("reason") or ""
+            if skip_reason == "聊天记录为空":
+                detail["status"] = "失败"
+                detail["reason"] = skip_reason
+            elif append_result.get("skipped") or skip_reason in (
+                "无新增聊天",
+                "新记录最后一条已在老记录中，已跳过",
+                "两边最后一条对不上，已跳过",
+            ):
+                detail["status"] = "跳过"
+                detail["reason"] = skip_reason or "已跳过"
                 result["unchanged_sessions"] += 1
+            result["session_details"].append(detail)
 
         except SQLAlchemyError as e:
             logger.exception("upsert session %s failed", original_session_id)
-            result["errors"].append(f"会话 {original_session_id}: {e}")
+            err_msg = f"会话 {original_session_id}: {e}"
+            result["errors"].append(err_msg)
+            result["session_details"].append({
+                "session_id": original_session_id,
+                "contact_name": session.get("联系人") or "",
+                "source_file": source_file or "",
+                "status": "失败",
+                "reason": str(e),
+                "messages_inserted": 0,
+            })
         except Exception as e:
             logger.exception("upsert session %s failed", original_session_id)
-            result["errors"].append(f"会话 {original_session_id}: {e}")
+            err_msg = f"会话 {original_session_id}: {e}"
+            result["errors"].append(err_msg)
+            result["session_details"].append({
+                "session_id": original_session_id,
+                "contact_name": session.get("联系人") or "",
+                "source_file": source_file or "",
+                "status": "失败",
+                "reason": str(e),
+                "messages_inserted": 0,
+            })
 
     return result
 
@@ -859,6 +1014,23 @@ def mark_deal_customers_from_qc(results: list[dict]) -> dict:
 # 成交心理分析
 # ---------------------------------------------------------------------------
 
+def count_unanalyzed_deal_customers() -> int:
+    """已成交且尚未做过心理学习的客户数（按客户去重）。"""
+    init_db()
+    engine = get_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("""
+                SELECT COUNT(*)
+                FROM customers c
+                LEFT JOIN deal_analysis da ON da.customer_id = c.id
+                WHERE c.status = '已成交'
+                  AND da.id IS NULL
+            """),
+        ).scalar()
+    return int(row or 0)
+
+
 def get_unanalyzed_deal_customers(limit: int = 20) -> list[dict]:
     init_db()
     engine = get_engine()
@@ -866,14 +1038,15 @@ def get_unanalyzed_deal_customers(limit: int = 20) -> list[dict]:
         rows = conn.execute(
             text("""
                 SELECT c.id AS customer_id,
-                       s.id AS session_id,
+                       (SELECT s.id FROM chat_sessions s
+                        WHERE s.customer_id = c.id
+                        ORDER BY s.updated_at DESC LIMIT 1) AS session_id,
                        c.original_session_id,
                        c.contact_name,
                        c.sales_name,
                        c.status,
                        c.deal_at
                 FROM customers c
-                JOIN chat_sessions s ON s.customer_id = c.id
                 LEFT JOIN deal_analysis da ON da.customer_id = c.id
                 WHERE c.status = '已成交'
                   AND da.id IS NULL
@@ -886,47 +1059,50 @@ def get_unanalyzed_deal_customers(limit: int = 20) -> list[dict]:
 
 
 def get_customer_full_dialog(customer_id: int) -> str:
-    engine = get_engine()
-    with engine.connect() as conn:
-        rows = conn.execute(
-            text("""
-                SELECT sender_type, sender_name, content, sent_at, raw_line
-                FROM chat_messages
-                WHERE customer_id = :cid
-                ORDER BY message_order ASC
-            """),
-            {"cid": customer_id},
-        ).fetchall()
-
-    if not rows:
+    def _run() -> str:
+        engine = get_engine()
         with engine.connect() as conn:
-            row = conn.execute(
+            rows = conn.execute(
                 text("""
-                    SELECT raw_dialog FROM chat_sessions
+                    SELECT sender_type, sender_name, content, sent_at, raw_line
+                    FROM chat_messages
                     WHERE customer_id = :cid
-                    ORDER BY updated_at DESC LIMIT 1
+                    ORDER BY message_order ASC
                 """),
                 {"cid": customer_id},
-            ).fetchone()
-            if row and row.raw_dialog:
-                return str(row.raw_dialog)
-        return ""
+            ).fetchall()
 
-    lines = []
-    for r in rows:
-        d = _row_to_dict(r)
-        if d.get("raw_line"):
-            lines.append(d["raw_line"])
-            continue
-        ts = d.get("sent_at")
-        sender = d.get("sender_name") or "未知"
-        content = d.get("content") or ""
-        if ts:
-            ts_str = ts.strftime("%Y-%m-%d %H:%M:%S") if isinstance(ts, datetime) else str(ts)
-            lines.append(f"[{ts_str}] {sender}：{content}")
-        else:
-            lines.append(f"{sender}：{content}")
-    return "\n".join(lines)
+        if not rows:
+            with engine.connect() as conn:
+                row = conn.execute(
+                    text("""
+                        SELECT raw_dialog FROM chat_sessions
+                        WHERE customer_id = :cid
+                        ORDER BY updated_at DESC LIMIT 1
+                    """),
+                    {"cid": customer_id},
+                ).fetchone()
+                if row and row.raw_dialog:
+                    return str(row.raw_dialog)
+            return ""
+
+        lines = []
+        for r in rows:
+            d = _row_to_dict(r)
+            if d.get("raw_line"):
+                lines.append(d["raw_line"])
+                continue
+            ts = d.get("sent_at")
+            sender = d.get("sender_name") or "未知"
+            content = d.get("content") or ""
+            if ts:
+                ts_str = ts.strftime("%Y-%m-%d %H:%M:%S") if isinstance(ts, datetime) else str(ts)
+                lines.append(f"[{ts_str}] {sender}：{content}")
+            else:
+                lines.append(f"{sender}：{content}")
+        return "\n".join(lines)
+
+    return with_db_retry(_run)
 
 
 _DEAL_FIELD_MAP = {
@@ -948,56 +1124,59 @@ _DEAL_FIELD_MAP = {
 
 def save_deal_analysis(customer_id: int, session_id: int | None, analysis: dict) -> None:
     init_db()
-    engine = get_engine()
     fields = {db_col: analysis.get(cn_key) or analysis.get(db_col) or ""
               for cn_key, db_col in _DEAL_FIELD_MAP.items()}
     raw = analysis if isinstance(analysis, dict) else {}
 
-    with engine.begin() as conn:
-        conn.execute(
-            text("""
-                INSERT INTO deal_analysis (
-                    customer_id, session_id,
-                    deal_stage_summary, customer_profile, core_need,
-                    core_pain_point, main_objection, trust_trigger,
-                    deal_trigger, key_turning_points, sales_key_actions,
-                    customer_psychology_path, deal_signals,
-                    reusable_sales_experience, recommended_agent_rules,
-                    raw_result
-                ) VALUES (
-                    :cid, :sid,
-                    :deal_stage_summary, :customer_profile, :core_need,
-                    :core_pain_point, :main_objection, :trust_trigger,
-                    :deal_trigger, :key_turning_points, :sales_key_actions,
-                    :customer_psychology_path, :deal_signals,
-                    :reusable_sales_experience, :recommended_agent_rules,
-                    :raw
-                )
-                ON DUPLICATE KEY UPDATE
-                    session_id = VALUES(session_id),
-                    deal_stage_summary = VALUES(deal_stage_summary),
-                    customer_profile = VALUES(customer_profile),
-                    core_need = VALUES(core_need),
-                    core_pain_point = VALUES(core_pain_point),
-                    main_objection = VALUES(main_objection),
-                    trust_trigger = VALUES(trust_trigger),
-                    deal_trigger = VALUES(deal_trigger),
-                    key_turning_points = VALUES(key_turning_points),
-                    sales_key_actions = VALUES(sales_key_actions),
-                    customer_psychology_path = VALUES(customer_psychology_path),
-                    deal_signals = VALUES(deal_signals),
-                    reusable_sales_experience = VALUES(reusable_sales_experience),
-                    recommended_agent_rules = VALUES(recommended_agent_rules),
-                    raw_result = VALUES(raw_result),
-                    analyzed_at = NOW()
-            """),
-            {
-                "cid": customer_id,
-                "sid": session_id,
-                **fields,
-                "raw": json.dumps(raw, ensure_ascii=False, default=str),
-            },
-        )
+    def _run() -> None:
+        engine = get_engine()
+        with engine.begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO deal_analysis (
+                        customer_id, session_id,
+                        deal_stage_summary, customer_profile, core_need,
+                        core_pain_point, main_objection, trust_trigger,
+                        deal_trigger, key_turning_points, sales_key_actions,
+                        customer_psychology_path, deal_signals,
+                        reusable_sales_experience, recommended_agent_rules,
+                        raw_result
+                    ) VALUES (
+                        :cid, :sid,
+                        :deal_stage_summary, :customer_profile, :core_need,
+                        :core_pain_point, :main_objection, :trust_trigger,
+                        :deal_trigger, :key_turning_points, :sales_key_actions,
+                        :customer_psychology_path, :deal_signals,
+                        :reusable_sales_experience, :recommended_agent_rules,
+                        :raw
+                    )
+                    ON DUPLICATE KEY UPDATE
+                        session_id = VALUES(session_id),
+                        deal_stage_summary = VALUES(deal_stage_summary),
+                        customer_profile = VALUES(customer_profile),
+                        core_need = VALUES(core_need),
+                        core_pain_point = VALUES(core_pain_point),
+                        main_objection = VALUES(main_objection),
+                        trust_trigger = VALUES(trust_trigger),
+                        deal_trigger = VALUES(deal_trigger),
+                        key_turning_points = VALUES(key_turning_points),
+                        sales_key_actions = VALUES(sales_key_actions),
+                        customer_psychology_path = VALUES(customer_psychology_path),
+                        deal_signals = VALUES(deal_signals),
+                        reusable_sales_experience = VALUES(reusable_sales_experience),
+                        recommended_agent_rules = VALUES(recommended_agent_rules),
+                        raw_result = VALUES(raw_result),
+                        analyzed_at = NOW()
+                """),
+                {
+                    "cid": customer_id,
+                    "sid": session_id,
+                    **fields,
+                    "raw": json.dumps(raw, ensure_ascii=False, default=str),
+                },
+            )
+
+    with_db_retry(_run)
 
 
 def list_deal_analyses(limit: int = 200, since_date: datetime | None = None) -> list[dict]:
@@ -1040,27 +1219,31 @@ def save_daily_learning_run(
     summary: str,
 ) -> None:
     init_db()
-    engine = get_engine()
-    with engine.begin() as conn:
-        conn.execute(
-            text("""
-                INSERT INTO daily_learning_runs (
-                    run_date, new_deal_customers, analyzed_customers,
-                    failed_customers, summary
-                ) VALUES (
-                    :dt, :new_deal, :analyzed, :failed, :summary
-                )
-                ON DUPLICATE KEY UPDATE
-                    new_deal_customers = VALUES(new_deal_customers),
-                    analyzed_customers = VALUES(analyzed_customers),
-                    failed_customers = VALUES(failed_customers),
-                    summary = VALUES(summary)
-            """),
-            {
-                "dt": run_date,
-                "new_deal": new_deal_customers,
-                "analyzed": analyzed_customers,
-                "failed": failed_customers,
-                "summary": summary,
-            },
-        )
+
+    def _run() -> None:
+        engine = get_engine()
+        with engine.begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO daily_learning_runs (
+                        run_date, new_deal_customers, analyzed_customers,
+                        failed_customers, summary
+                    ) VALUES (
+                        :dt, :new_deal, :analyzed, :failed, :summary
+                    )
+                    ON DUPLICATE KEY UPDATE
+                        new_deal_customers = VALUES(new_deal_customers),
+                        analyzed_customers = VALUES(analyzed_customers),
+                        failed_customers = VALUES(failed_customers),
+                        summary = VALUES(summary)
+                """),
+                {
+                    "dt": run_date,
+                    "new_deal": new_deal_customers,
+                    "analyzed": analyzed_customers,
+                    "failed": failed_customers,
+                    "summary": summary,
+                },
+            )
+
+    with_db_retry(_run)

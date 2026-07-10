@@ -26,8 +26,11 @@ if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
 _PROMPTS_DIR = os.path.join(_APP_DIR, "prompts")
-_SUPPLEMENT_FILE = os.path.join(_PROMPTS_DIR, "deal_learned_supplement.md")
+SUPPLEMENT_FILE = os.path.join(_PROMPTS_DIR, "deal_learned_supplement.md")
 _OUTPUT_DIR = os.path.join(os.path.dirname(_APP_DIR), "输出结果")
+
+# 兼容旧内部名
+_SUPPLEMENT_FILE = SUPPLEMENT_FILE
 
 
 def _ensure_dirs() -> None:
@@ -97,14 +100,24 @@ def build_review_markdown(rules: list[dict], days: int) -> str:
     return "\n".join(lines)
 
 
-def extract_rules_from_review_file(path: str) -> list[str]:
-    """从待审核 markdown 或纯文本中提取规则块。"""
-    with open(path, "r", encoding="utf-8") as f:
-        content = f.read()
+def export_rules_markdown(days: int = 7) -> tuple[list[dict], str]:
+    """从数据库拉取规则并生成待审核 Markdown。"""
+    rules = fetch_rules(days=days)
+    md = build_review_markdown(rules, days)
+    return rules, md
 
+
+def read_current_supplement() -> str:
+    if os.path.isfile(SUPPLEMENT_FILE):
+        with open(SUPPLEMENT_FILE, encoding="utf-8") as f:
+            return f.read()
+    return ""
+
+
+def extract_rules_from_text(content: str) -> list[str]:
+    """从待审核 markdown 或纯文本中提取规则块。"""
     rules: list[str] = []
-    # 按 ### 规则 分段
-    blocks = re.split(r"(?m)^###\s+规则\s+\d+", content)
+    blocks = re.split(r"(?m)^###\s+规则\s+\d+", content or "")
     for block in blocks[1:]:
         m = re.search(
             r"\*\*智能体判断规则[^*]*\*\*\s*\n+([\s\S]*?)(?=\n---|\n###|\Z)",
@@ -115,14 +128,57 @@ def extract_rules_from_review_file(path: str) -> list[str]:
             if rule:
                 rules.append(rule)
                 continue
-        # 纯文本：非标题行
         lines = [ln.strip() for ln in block.splitlines() if ln.strip() and not ln.startswith("#")]
         if lines:
             rules.append("\n".join(lines).strip())
 
-    if not rules and content.strip():
+    if not rules and (content or "").strip():
+        # 已是 supplement 格式（## 规则 N）
+        blocks2 = re.split(r"(?m)^##\s+规则\s+\d+", content)
+        for block in blocks2[1:]:
+            body = block.strip()
+            if body and not body.startswith("<!--"):
+                rules.append(body.split("\n---")[0].strip())
+
+    if not rules and (content or "").strip():
         rules.append(content.strip())
     return rules
+
+
+def extract_rules_from_review_file(path: str) -> list[str]:
+    """从待审核 markdown 或纯文本文件中提取规则块。"""
+    with open(path, encoding="utf-8") as f:
+        return extract_rules_from_text(f.read())
+
+
+def apply_rules_to_supplement(
+    rules: list[str],
+    *,
+    merge_existing: bool = False,
+) -> dict:
+    """将规则写入 deal_learned_supplement.md。"""
+    _ensure_dirs()
+    cleaned = [r.strip() for r in rules if (r or "").strip()]
+    if merge_existing:
+        existing = extract_rules_from_text(read_current_supplement())
+        seen = set(existing)
+        merged = list(existing)
+        for rule in cleaned:
+            if rule not in seen:
+                merged.append(rule)
+                seen.add(rule)
+        cleaned = merged
+    if not cleaned:
+        return {"ok": False, "error": "没有可写入的规则", "count": 0, "path": SUPPLEMENT_FILE}
+    md = build_supplement_markdown(cleaned)
+    with open(SUPPLEMENT_FILE, "w", encoding="utf-8") as f:
+        f.write(md)
+    return {
+        "ok": True,
+        "count": len(cleaned),
+        "path": SUPPLEMENT_FILE,
+        "preview": md,
+    }
 
 
 def build_supplement_markdown(rules: list[str]) -> str:
@@ -141,8 +197,7 @@ def build_supplement_markdown(rules: list[str]) -> str:
 
 def cmd_export(days: int, dry_run: bool) -> str:
     _ensure_dirs()
-    rules = fetch_rules(days=days)
-    md = build_review_markdown(rules, days)
+    rules, md = export_rules_markdown(days=days)
     if dry_run:
         print(md[:3000])
         if len(md) > 3000:
@@ -156,7 +211,7 @@ def cmd_export(days: int, dry_run: bool) -> str:
     return out_path
 
 
-def cmd_apply(input_path: str, dry_run: bool) -> None:
+def cmd_apply(input_path: str, dry_run: bool, merge_existing: bool = False) -> None:
     if not os.path.isfile(input_path):
         print(f"文件不存在：{input_path}")
         sys.exit(1)
@@ -164,13 +219,22 @@ def cmd_apply(input_path: str, dry_run: bool) -> None:
     if not rules:
         print("未从文件中解析到任何规则。")
         sys.exit(1)
-    md = build_supplement_markdown(rules)
     if dry_run:
-        print(md)
+        preview_rules = rules
+        if merge_existing:
+            existing = extract_rules_from_text(read_current_supplement())
+            seen = set(existing)
+            preview_rules = list(existing)
+            for r in rules:
+                if r not in seen:
+                    preview_rules.append(r)
+        print(build_supplement_markdown(preview_rules))
         return
-    with open(_SUPPLEMENT_FILE, "w", encoding="utf-8") as f:
-        f.write(md)
-    print(f"已合并 {len(rules)} 条规则 → {_SUPPLEMENT_FILE}")
+    result = apply_rules_to_supplement(rules, merge_existing=merge_existing)
+    if not result.get("ok"):
+        print(result.get("error") or "写入失败")
+        sys.exit(1)
+    print(f"已合并 {result['count']} 条规则 → {result['path']}")
 
 
 def main():

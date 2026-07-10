@@ -3,10 +3,17 @@
   "model": "deepseek-v4-pro",
   "models": ["deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"],
   "api_key": "YOUR_API_KEY_HERE",
-  "concurrency": 24,
+  "concurrency": 100,
+  "_concurrency_note": "deepseek-v4-pro 账号并发上限 500，默认 100；flash 上限 2500。网页质检页可临时调整。",
   "max_chars": 16000,
   "app_password": "",
   "deal_context_enabled": true,
   "deal_context_limit": 5,
-  "deal_context_prefer_today": true
+  "deal_context_prefer_today": true,
+  "deal_learn_skip_score": 6.0,
+  "deal_learn_incremental_score": 3.0,
+  "deal_learn_incremental_enabled": true,
+  "deal_learn_ref_limit": 3,
+  "deal_learn_max_dialog_chars": 8000,
+  "deal_learn_coverage_llm": false
 }

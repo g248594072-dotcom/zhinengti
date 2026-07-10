@@ -2,6 +2,8 @@
 """
 每日成交客户心理学习定时任务。
 
+建议在每日拉取入库之后运行（fetch_deal_daily.py 建议 02:00，本任务 03:00）。
+
 用法：
     python daily_job.py --limit 20
 """

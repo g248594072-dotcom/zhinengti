@@ -169,7 +169,14 @@ CONFIG_DIR = get_app_dir()
 CONFIG_FILE = os.path.join(CONFIG_DIR, "qc_config.json")
 CONFIG_EXAMPLE_FILE = os.path.join(CONFIG_DIR, "qc_config.example.json")
 
-DEFAULT_CONCURRENCY = 24
+DEFAULT_CONCURRENCY = 100
+
+# DeepSeek 账号级并发上限：https://api-docs.deepseek.com/zh-cn/quick_start/rate_limit
+MODEL_CONCURRENCY_LIMITS = {
+    "deepseek-v4-pro": 500,
+    "deepseek-v4-flash": 2500,
+}
+DEFAULT_MODEL_CONCURRENCY_LIMIT = 500
 
 DEFAULTS = {
     "base_url": "https://api.deepseek.com",
@@ -184,6 +191,20 @@ DEFAULTS = {
 
 CONFIG_KEYS = ("base_url", "model", "api_key", "concurrency", "max_chars", "app_password", "models")
 _PLACEHOLDER_KEYS = frozenset({"", "YOUR_API_KEY_HERE"})
+
+
+def max_concurrency_for_model(model: str | None) -> int:
+    """返回当前模型在 DeepSeek 侧的并发上限（用于 UI 校验）。"""
+    name = str(model or DEFAULTS.get("model") or "").strip().lower()
+    for key, limit in MODEL_CONCURRENCY_LIMITS.items():
+        if key in name:
+            return limit
+    return DEFAULT_MODEL_CONCURRENCY_LIMIT
+
+
+def default_concurrency_for_model(model: str | None) -> int:
+    """推荐默认并发：不超过模型上限，常规账号默认 100。"""
+    return min(DEFAULT_CONCURRENCY, max_concurrency_for_model(model))
 
 
 def mask_api_key(key):
@@ -1511,7 +1532,7 @@ def _resolve_deal_context(cfg, dialog: str, use_deal_context: bool | None) -> tu
     """返回 (reference_note, deals, count_label, summary)。"""
     enabled = cfg.get("deal_context_enabled", True) if use_deal_context is None else bool(use_deal_context)
     if not enabled:
-        return "", [], ""
+        return "", [], "", ""
     try:
         from deal_context import get_deal_context_for_qc, summarize_deal_refs
 

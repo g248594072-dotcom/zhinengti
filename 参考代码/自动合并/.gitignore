@@ -1,0 +1,15 @@
+build/
+dist/
+release/
+*.spec.bak
+__pycache__/
+*.pyc
+startup_error.log
+输出/
+api-key.json
+*_analysis.py
+diff_chat_analysis.txt
+compare_*.json
+compare_*.txt
+liu_nana_hi.txt
+dengfei_hi.txt

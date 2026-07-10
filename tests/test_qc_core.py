@@ -405,6 +405,36 @@ class TestDealContext(unittest.TestCase):
         self.assertEqual(len(diffs), 2)
         self.assertEqual(diffs[0]["字段"], "是否合格")
 
+    def test_resolve_deal_context_disabled_returns_four_values(self):
+        out = core._resolve_deal_context({"deal_context_enabled": False}, "客户 : hi", None)
+        self.assertEqual(out, ("", [], "", ""))
+
+    def test_qc_skip_tier_no_deal_context(self):
+        """规则筛选档不走成交经验检索，也不调 API。"""
+        session = {
+            "会话ID": "s1",
+            "联系人": "Test",
+            "接待成员": "客服A",
+            "渠道": "微信",
+            "对话": '客户 : "hi"\n乐乐 : "hello"\n',
+        }
+        row, tier = core.qc_one_session({"deal_context_enabled": True}, session)
+        self.assertEqual(tier, "skip")
+        self.assertEqual(row.get("结果标签"), "规则筛选")
+        self.assertEqual(row.get("成交参考案例数"), "")
+        self.assertNotIn("_错误", row)
+
+
+class TestConcurrencyHelpers(unittest.TestCase):
+    def test_max_concurrency_pro(self):
+        self.assertEqual(core.max_concurrency_for_model("deepseek-v4-pro"), 500)
+
+    def test_max_concurrency_flash(self):
+        self.assertEqual(core.max_concurrency_for_model("deepseek-v4-flash"), 2500)
+
+    def test_default_concurrency(self):
+        self.assertEqual(core.default_concurrency_for_model("deepseek-v4-pro"), 100)
+
 
 class TestEnrichSystemPrompt(unittest.TestCase):
     def test_enrich_skips_empty_supplement(self):
