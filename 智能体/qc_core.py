@@ -837,7 +837,7 @@ def extract_agent_segments(text):
 
 def _is_invalid_customer_segment(seg):
     s = (seg or "").strip()
-    return not s or s == IMG_TOKEN or s == "1" or _is_power_emoji_tag(s)
+    return not s or s == IMG_TOKEN or s == "1"
 
 
 def _is_invalid_agent_segment(seg):
@@ -846,7 +846,7 @@ def _is_invalid_agent_segment(seg):
 
 
 def count_valid_customer_segments(text):
-    """客户发言数：非图片 / 非【💪40+】表情 / 非孤立「1」的客户发言条数。"""
+    """客户发言数：非图片 / 非孤立「1」的客户发言条数（含【50+】等广告进线力度标签）。"""
     return sum(1 for seg in extract_customer_segments(text) if not _is_invalid_customer_segment(seg))
 
 

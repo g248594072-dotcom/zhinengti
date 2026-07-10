@@ -45,6 +45,15 @@ class TestCountRoles(unittest.TestCase):
         self.assertEqual(cust, 2)
         self.assertEqual(serv, 2)
 
+    def test_power_tag_counts_as_customer_speech(self):
+        text = (
+            '[2026-07-10 10:00:00] 客户 : "【💪50+】"\n'
+            '[2026-07-10 10:01:00] 乐乐 : "hello"\n'
+        )
+        cust, serv = core.count_roles(text)
+        self.assertEqual(cust, 1)
+        self.assertEqual(serv, 1)
+
     def test_system_roles_not_counted_as_service(self):
         text = (
             '客户 : "x"\n'
