@@ -12,8 +12,9 @@ from db import init_db, get_engine, normalize_session_id, upsert_sessions
 from sqlalchemy import text
 
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
-_CONFIG_PATH = os.path.join(_APP_DIR, "import_deal_config.json")
-_CONFIG_EXAMPLE = os.path.join(_APP_DIR, "import_deal_config.example.json")
+_CONFIG_DIR = core.get_config_dir()
+_CONFIG_PATH = os.path.join(_CONFIG_DIR, "import_deal_config.json")
+_CONFIG_EXAMPLE = os.path.join(_CONFIG_DIR, "import_deal_config.example.json")
 
 
 def load_import_config() -> dict:
@@ -50,7 +51,7 @@ def get_mysql_target_label(cfg: dict | None = None) -> str:
     db_name = (cfg.get("mysql_database") or "").strip()
     try:
         from dotenv import load_dotenv
-        load_dotenv(os.path.join(_APP_DIR, ".env"))
+        load_dotenv(os.path.join(_CONFIG_DIR, ".env"))
         host = os.getenv("MYSQL_HOST", "127.0.0.1")
         port = os.getenv("MYSQL_PORT", "3306")
         env_db = os.getenv("MYSQL_DATABASE", "")

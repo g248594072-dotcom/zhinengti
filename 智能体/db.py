@@ -25,7 +25,8 @@ import qc_core as core
 logger = logging.getLogger(__name__)
 
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
-_ENV_PATH = os.path.join(_APP_DIR, ".env")
+_CONFIG_DIR = (os.environ.get("QC_CONFIG_DIR") or "").strip() or _APP_DIR
+_ENV_PATH = os.path.join(_CONFIG_DIR, ".env")
 
 _SESSION_ID_KEYS = ("会话ID", "会话id", "session_id", "sessionId", "Session ID", "会话编号")
 

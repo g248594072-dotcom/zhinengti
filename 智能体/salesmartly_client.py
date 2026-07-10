@@ -94,7 +94,8 @@ def app_dir() -> str:
 
 
 def config_path() -> str:
-    return os.path.join(app_dir(), "api-key.json")
+    config_dir = (os.environ.get("QC_CONFIG_DIR") or "").strip() or app_dir()
+    return os.path.join(config_dir, "api-key.json")
 
 
 def load_config(path: Optional[str] = None) -> Config:

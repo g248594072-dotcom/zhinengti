@@ -10,10 +10,12 @@ from datetime import datetime
 import requests
 from dotenv import load_dotenv
 
+import qc_core as core
+
 logger = logging.getLogger(__name__)
 
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
-_ENV_PATH = os.path.join(_APP_DIR, ".env")
+_ENV_PATH = os.path.join(core.get_config_dir(), ".env")
 
 # 飞书单条文本建议不超过约 4000 字
 _MAX_MESSAGE_CHARS = 3800

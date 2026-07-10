@@ -31,6 +31,14 @@ def get_app_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def get_config_dir():
+    """配置目录：Docker 可通过环境变量 QC_CONFIG_DIR 指向挂载卷（如 /app/config）。"""
+    override = (os.environ.get("QC_CONFIG_DIR") or "").strip()
+    if override:
+        return override
+    return get_app_dir()
+
+
 def _prompt_search_paths(filename):
     app_dir = get_app_dir()
     paths = [os.path.join(app_dir, "prompts", filename)]
@@ -165,7 +173,7 @@ PROGRESS_COMPARE_REPORT_COLUMNS = [
     "_错误", "新增对话",
 ]
 
-CONFIG_DIR = get_app_dir()
+CONFIG_DIR = get_config_dir()
 CONFIG_FILE = os.path.join(CONFIG_DIR, "qc_config.json")
 CONFIG_EXAMPLE_FILE = os.path.join(CONFIG_DIR, "qc_config.example.json")
 
