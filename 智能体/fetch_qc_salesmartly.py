@@ -199,6 +199,11 @@ def fetch_qc_dataframe(
             continue
 
         msgs = messages_by_session.get(session_id, [])
+        contact_name = (
+            str(contact.get("name") or "").strip()
+            or str(session.get("title") or "").strip()
+            or uid
+        )
         message_text = "\n".join(
             _format_message_line(m, member_id_to_name)
             for m in msgs
@@ -207,15 +212,14 @@ def fetch_qc_dataframe(
         if not message_text.strip():
             continue
 
+        message_text = core.normalize_customer_speaker_in_dialog(message_text, contact_name)
+        if not message_text.strip():
+            continue
+
         if require_customer_speech and not _has_customer_speech_in_window(message_text, window):
             skipped_no_speech += 1
             continue
 
-        contact_name = (
-            str(contact.get("name") or "").strip()
-            or str(session.get("title") or "").strip()
-            or uid
-        )
         sys_user_id = session.get("sys_user_id") or contact.get("sys_user_id")
         try:
             agent_name = member_id_to_name.get(int(sys_user_id), "")

@@ -81,7 +81,7 @@ def enrich_system_prompt(base: str, tier: str = "full") -> str:
 # ============================================================
 # 分级与报告列
 # ============================================================
-TIER_SKIP_MAX = 4
+TIER_SKIP_MAX = 3
 TIER_LIGHT_MAX = 6
 LITE_MAX_CHARS = 6000
 UTTERANCE_GAP_MINUTES = 5
@@ -743,7 +743,14 @@ def load_sessions(files=None, file_dfs=None, column_map=None, time_scope=TIME_SC
         sid = s["会话ID"]
         if sid not in uniq or len(s["对话"]) > len(uniq[sid]["对话"]):
             uniq[sid] = s
-    return list(uniq.values()), diag, window_info
+    out = []
+    for s in uniq.values():
+        contact = s.get("联系人", "")
+        if contact:
+            s = dict(s)
+            s["对话"] = normalize_customer_speaker_in_dialog(s.get("对话") or "", contact)
+        out.append(s)
+    return out, diag, window_info
 
 
 _SYSTEM_ROLES = frozenset({"自动化", "自定义", "其他平台"})
@@ -876,6 +883,19 @@ def _parse_speaker(line):
     if not m:
         return None
     return m.group(1).strip()
+
+
+def normalize_customer_speaker_in_dialog(text, contact_name):
+    """将「联系人姓名 : …」统一为「客户 : …」，兼容部分导出把访客名写在发言人列的情况。"""
+    contact = (contact_name or "").strip()
+    if not contact or not str(text or "").strip():
+        return text
+    escaped = re.escape(contact)
+    pattern = re.compile(
+        rf"^(\[[^\]]+\]\s*)?{escaped}(\s*[:：])",
+        re.MULTILINE | re.IGNORECASE,
+    )
+    return pattern.sub(r"\1客户\2", str(text))
 
 
 # ============================================================
@@ -1955,7 +1975,7 @@ REPORT_SHEET_LOW_INTENT = "低意向客户"
 
 
 def _is_low_intent_row(row):
-    """客户发言不足 4 条，跳过 API 质检的低意向会话。"""
+    """客户发言不足 3 条，跳过 API 质检的低意向会话。"""
     tier = str(row.get("质检档位", "")).strip()
     if tier == TIER_LABEL["skip"]:
         return True

@@ -66,11 +66,25 @@ class TestCountRoles(unittest.TestCase):
         self.assertEqual(cust, 1)
         self.assertEqual(serv, 1)
 
+    def test_normalize_contact_name_as_customer_speaker(self):
+        dialog = (
+            '[2026-07-12 10:00:00] Jay Bullock : "hi"\n'
+            '[2026-07-12 10:01:00] 马俊鹏 : "hello"\n'
+            '[2026-07-12 10:02:00] Jay Bullock : "price?"\n'
+        )
+        normalized = core.normalize_customer_speaker_in_dialog(dialog, "Jay Bullock")
+        cust, serv = core.count_roles(normalized)
+        self.assertEqual(cust, 2)
+        self.assertEqual(serv, 1)
+        self.assertIn("客户 :", normalized)
+        self.assertNotIn("Jay Bullock :", normalized)
+
 
 class TestClassifyTier(unittest.TestCase):
     def test_skip_light_full_boundaries(self):
         self.assertEqual(core.classify_tier(0), "skip")
-        self.assertEqual(core.classify_tier(3), "skip")
+        self.assertEqual(core.classify_tier(2), "skip")
+        self.assertEqual(core.classify_tier(3), "light")
         self.assertEqual(core.classify_tier(4), "light")
         self.assertEqual(core.classify_tier(6), "light")
         self.assertEqual(core.classify_tier(7), "full")
