@@ -1294,7 +1294,11 @@ def _low_intent_screen_note(text):
     if only_invalid:
         silence = f"{silence}（无效发言）"
     if not burst_starts:
-        return f"客户沉默于{silence}，之后销售未发送"
+        cust_count = count_valid_customer_segments(text)
+        hint = ""
+        if cust_count < TIER_LIGHT_MAX:
+            hint = "；当天发言不多，应及时跟进、多发带价值消息"
+        return f"客户沉默于{silence}，之后销售未发送{hint}"
     times = "、".join(_format_ts(ts) for ts in burst_starts)
     return f"客户沉默于{silence}，之后销售发送{len(burst_starts)}次：{times}"
 
