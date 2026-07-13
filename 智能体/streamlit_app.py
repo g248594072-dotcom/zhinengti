@@ -110,6 +110,8 @@ def _init_state():
         "kb_review_md": "",
         "kb_parsed_preview": None,
         "kb_supplement_preview": None,
+        "kb_refine_result": None,
+        "kb_refined_rules": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1240,8 +1242,27 @@ def _render_deal_learn_prompt(cfg, default_limit: int) -> None:
             _render_deal_learning_settlement(st.session_state.deal_last_learn_result)
 
 
+def _kb_clear_refine_state() -> None:
+    st.session_state.kb_refine_result = None
+    st.session_state.kb_refined_rules = None
+
+
+def _kb_get_write_rules(extract_fn) -> tuple[list[str], str]:
+    """写入步骤使用的规则列表及来源说明。"""
+    refined = st.session_state.get("kb_refined_rules")
+    if refined is not None:
+        return refined, f"AI 提纯勾选（{len(refined)} 条）"
+    raw = extract_fn(st.session_state.get("kb_review_md") or "")
+    return raw, f"编辑区原始（{len(raw)} 条）"
+
+
 def _render_knowledge_base_tab(cfg) -> None:
-    """全局知识库：从 DB 导出规则 → 在线审核 → 写入 supplement。"""
+    """全局知识库：从 DB 导出规则 → 在线审核 → AI 提纯 → 写入 supplement。"""
+    from rule_refine import (
+        collect_rules_from_categories,
+        refine_rules,
+        refine_stats,
+    )
     from weekly_prompt_merge import (
         SUPPLEMENT_FILE,
         apply_rules_to_supplement,
@@ -1269,6 +1290,7 @@ def _render_knowledge_base_tab(cfg) -> None:
             st.session_state.kb_review_md = current
             st.session_state.kb_parsed_preview = None
             st.session_state.kb_supplement_preview = None
+            _kb_clear_refine_state()
             st.rerun()
     else:
         st.info("暂无全局知识库文件；完成下方「导出 → 审核 → 写入」后将自动创建。")
@@ -1290,6 +1312,7 @@ def _render_knowledge_base_tab(cfg) -> None:
             st.session_state.kb_review_md = md
             st.session_state.kb_parsed_preview = None
             st.session_state.kb_supplement_preview = None
+            _kb_clear_refine_state()
             st.success(f"已加载 **{len(rules)}** 条不重复规则（最近 {int(days)} 天）")
             st.rerun()
         except RuntimeError as e:
@@ -1333,7 +1356,98 @@ def _render_knowledge_base_tab(cfg) -> None:
         else:
             st.warning("未能从编辑区解析出规则，请保留 `### 规则 N` 与「智能体判断规则」块格式。")
 
-    st.subheader("4. 写入全局知识库")
+    st.subheader("4. AI 提纯去重与分类")
+    st.caption(
+        "调用 API 合并语义重复的规则，并按场景自动分类。"
+        "可取消勾选「投资类」「情感操控类」等不需要写入的类别。"
+    )
+
+    c_ref1, c_ref2 = st.columns([1, 2])
+    with c_ref1:
+        if st.button("开始 AI 提纯去重", type="secondary", key="kb_refine_btn"):
+            src_rules = extract_rules_from_text(st.session_state.get("kb_review_md") or "")
+            if not src_rules:
+                st.error("编辑区没有可提纯的规则，请先导出或解析。")
+            else:
+                with st.spinner(f"正在对 {len(src_rules)} 条规则提纯去重，请稍候…"):
+                    refine_result = refine_rules(src_rules, cfg)
+                if refine_result.get("ok"):
+                    st.session_state.kb_refine_result = refine_result
+                    st.session_state.kb_refined_rules = None
+                    st.session_state.kb_supplement_preview = None
+                    st.rerun()
+                else:
+                    st.error(refine_result.get("error") or "提纯失败")
+    with c_ref2:
+        if st.session_state.get("kb_refine_result"):
+            if st.button("清除提纯结果", key="kb_refine_clear"):
+                _kb_clear_refine_state()
+                st.session_state.kb_supplement_preview = None
+                st.rerun()
+
+    refine_result = st.session_state.get("kb_refine_result")
+    if refine_result and refine_result.get("ok"):
+        if refine_result.get("汇总说明"):
+            st.info(refine_result["汇总说明"])
+        st.caption(
+            f"原始 **{refine_result.get('原始条数', 0)}** 条 → "
+            f"去重后 **{refine_result.get('去重后条数', 0)}** 条 · "
+            f"共 **{len(refine_result.get('分类列表') or [])}** 个分类"
+        )
+
+        with st.form("kb_refine_category_form", clear_on_submit=False):
+            st.markdown("**勾选要写入知识库的分类**（未勾选的分类下所有规则均不写入）")
+            enabled_ids: list[str] = []
+            for cat in refine_result.get("分类列表") or []:
+                cid = str(cat.get("分类ID") or "")
+                title = cat.get("分类标题") or cid
+                desc = (cat.get("分类说明") or "").strip()
+                n_rules = len(cat.get("规则条目") or [])
+                default_on = bool(cat.get("默认勾选", True))
+                label = f"{title}（{n_rules} 条）"
+                if desc:
+                    label += f" — {desc[:80]}{'…' if len(desc) > 80 else ''}"
+                if not default_on:
+                    label += " · 建议排除"
+                if st.checkbox(label, value=default_on, key=f"kb_refine_cat_{cid}"):
+                    enabled_ids.append(cid)
+
+            live_stats = refine_stats(refine_result, set(enabled_ids))
+            st.caption(
+                f"当前勾选：**{live_stats['已勾选分类数']}/{live_stats['分类数']}** 类，"
+                f"将写入 **{live_stats['将写入条数']}** 条规则"
+            )
+            submitted = st.form_submit_button("确认选用以上勾选结果", type="primary")
+            if submitted:
+                selected = collect_rules_from_categories(refine_result, enabled_ids)
+                if not selected:
+                    st.warning("请至少勾选一个分类。")
+                else:
+                    st.session_state.kb_refined_rules = selected
+                    st.session_state.kb_supplement_preview = None
+                    st.rerun()
+
+        for cat in refine_result.get("分类列表") or []:
+            title = cat.get("分类标题") or cat.get("分类ID")
+            n_rules = len(cat.get("规则条目") or [])
+            with st.expander(f"查看「{title}」规则详情（{n_rules} 条）", expanded=False):
+                for item in cat.get("规则条目") or []:
+                    src = item.get("合并自序号") or []
+                    src_hint = (
+                        f"合并自原始规则 #{', #'.join(str(x) for x in src)}"
+                        if src else ""
+                    )
+                    st.markdown(f"**{item.get('规则ID', '')}** {src_hint}")
+                    st.text(item.get("规则文本") or "")
+
+    if st.session_state.get("kb_refined_rules") is not None:
+        n = len(st.session_state.kb_refined_rules)
+        st.success(f"✓ 已确认选用 **{n}** 条提纯规则用于写入（跳过步骤 4 则使用编辑区原始规则）")
+
+    st.subheader("5. 写入全局知识库")
+    write_rules, write_source = _kb_get_write_rules(extract_rules_from_text)
+    st.caption(f"当前写入来源：**{write_source}**")
+
     merge_existing = st.checkbox(
         "合并到现有知识库（追加不重复项，保留已有规则）",
         value=False,
@@ -1345,7 +1459,7 @@ def _render_knowledge_base_tab(cfg) -> None:
     c5, c6 = st.columns(2)
     with c5:
         if st.button("仅预览合并结果", key="kb_dry_apply"):
-            rules = extract_rules_from_text(st.session_state.get("kb_review_md") or "")
+            rules = write_rules
             if not rules:
                 st.warning("没有可预览的规则")
             else:
@@ -1359,7 +1473,6 @@ def _render_knowledge_base_tab(cfg) -> None:
                             preview_rules.append(r)
                             seen.add(r)
                 st.session_state.kb_supplement_preview = build_supplement_markdown(preview_rules)
-                st.session_state.kb_parsed_preview = preview_rules
 
     preview_md = st.session_state.get("kb_supplement_preview")
     if preview_md:
@@ -1368,9 +1481,9 @@ def _render_knowledge_base_tab(cfg) -> None:
 
     with c6:
         if st.button("确认写入全局知识库", type="primary", key="kb_apply"):
-            rules = extract_rules_from_text(st.session_state.get("kb_review_md") or "")
+            rules = write_rules
             if not rules:
-                st.error("编辑区没有可写入的规则，请先导出并保留至少一条规则。")
+                st.error("没有可写入的规则。请先导出、提纯选用，或保留编辑区至少一条规则。")
             else:
                 try:
                     result = apply_rules_to_supplement(rules, merge_existing=merge_existing)

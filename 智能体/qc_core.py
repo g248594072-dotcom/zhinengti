@@ -1417,10 +1417,14 @@ def fetch_available_models(cfg, timeout=15):
     return models, None
 
 
-def call_llm_prompt(cfg, system_prompt, user_prompt, max_chars=None):
+def call_llm_prompt(cfg, system_prompt, user_prompt, max_chars=None, truncate=True):
     """通用 LLM 调用（质检 / 成交学习共用），返回解析后的 JSON dict。"""
     limit = max_chars or max(int(cfg.get("max_chars", 16000)), 24000)
-    text = _truncate_dialog_for_llm(user_prompt, limit)
+    text = (
+        user_prompt
+        if not truncate
+        else _truncate_dialog_for_llm(user_prompt, limit)
+    )
     url = cfg["base_url"].rstrip("/") + "/chat/completions"
     headers = {
         "Authorization": "Bearer " + cfg["api_key"],
