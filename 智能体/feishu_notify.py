@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 from dotenv import load_dotenv
@@ -82,68 +82,64 @@ def _read_log_tail(log_path: str, lines: int = _DEFAULT_LOG_TAIL_LINES) -> str:
         return ""
 
 
-def build_daily_job_report(
-    result: dict,
-    log_path: str | None = None,
-    log_tail_lines: int = _DEFAULT_LOG_TAIL_LINES,
-) -> str:
-    """组装每日成交学习日报文本。"""
+def _default_business_day(when: datetime | None = None) -> datetime:
+    """每日学习对应的业务日 = 发送日的前一天（与 fetch_deal_daily 一致）。"""
+    base = (when or datetime.now()).replace(hour=0, minute=0, second=0, microsecond=0)
+    return base - timedelta(days=1)
+
+
+def _format_business_day_label(result: dict) -> str:
+    """如 7.12（2026-07-12）。"""
+    day_str = (result.get("business_day") or "").strip()
+    tag = (result.get("business_date_tag") or "").strip()
+    if day_str and tag:
+        return f"{tag.replace('..', '.')}（{day_str}）"
+    if day_str:
+        try:
+            d = datetime.strptime(day_str, "%Y-%m-%d")
+            return f"{d.month}.{d.day}（{day_str}）"
+        except ValueError:
+            return day_str
+    biz = _default_business_day()
+    return f"{biz.month}.{biz.day}（{biz.strftime('%Y-%m-%d')}）"
+
+
+def build_daily_job_report(result: dict) -> str:
+    """组装每日成交学习日报（精简版，不含日志尾部）。"""
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     total = int(result.get("total") or 0)
     success = int(result.get("success") or 0)
     failed = int(result.get("failed") or 0)
-    errors = result.get("errors") or []
-    learned = result.get("learned_items") or []
+    kb_pending = result.get("kb_pending")
 
     lines = [
         "【成交客户每日学习报告】",
         f"时间：{now}",
+        f"业务日：{_format_business_day_label(result)} 成交客户",
         f"待分析：{total}",
         f"成功：{success}",
         f"失败：{failed}",
     ]
 
-    if learned:
-        lines.append("")
-        lines.append("今日新增智能体判断规则：")
-        for item in learned[:8]:
-            name = item.get("contact_name") or "?"
-            rule = (item.get("recommended_agent_rules") or "").strip()
-            obj = (item.get("main_objection") or "").strip()
-            head = f"· {name}"
-            if obj:
-                head += f"（{obj[:40]}）"
-            lines.append(head)
-            if rule:
-                lines.append(f"  {rule[:280]}")
-        if len(learned) > 8:
-            lines.append(f"… 另有 {len(learned) - 8} 条未展示")
+    if kb_pending is not None:
+        try:
+            pending = int(kb_pending)
+        except (TypeError, ValueError):
+            pending = 0
+        lines.append(f"未写入知识库：{pending} 条（待审核合并至 deal_learned_supplement.md）")
 
-    if errors:
+    if failed > 0 and result.get("errors"):
         lines.append("")
         lines.append("失败详情：")
-        for err in errors[:10]:
+        for err in (result.get("errors") or [])[:5]:
             lines.append(f"· {err}")
-        if len(errors) > 10:
-            lines.append(f"… 另有 {len(errors) - 10} 条未展示")
-
-    if log_path:
-        tail = _read_log_tail(log_path, log_tail_lines)
-        if tail:
-            lines.append("")
-            lines.append(f"--- 最近日志（{log_tail_lines} 行）---")
-            lines.append(tail)
 
     return "\n".join(lines)
 
 
-def notify_daily_job_result(
-    result: dict,
-    log_path: str | None = None,
-    log_tail_lines: int = _DEFAULT_LOG_TAIL_LINES,
-) -> bool:
+def notify_daily_job_result(result: dict) -> bool:
     """分析完成后推送飞书日报。"""
-    msg = build_daily_job_report(result, log_path=log_path, log_tail_lines=log_tail_lines)
+    msg = build_daily_job_report(result)
     return send_feishu_text(msg)
 
 

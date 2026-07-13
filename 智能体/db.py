@@ -1212,6 +1212,29 @@ def list_deal_analyses_since_days(days: int = 7, limit: int = 500) -> list[dict]
     return list_deal_analyses(limit=limit, since_date=since)
 
 
+def list_distinct_agent_rules() -> list[str]:
+    """deal_analysis 中不重复且非空的「智能体判断规则」文本列表。"""
+    init_db()
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT DISTINCT recommended_agent_rules
+                FROM deal_analysis
+                WHERE recommended_agent_rules IS NOT NULL
+                  AND TRIM(recommended_agent_rules) != ''
+            """),
+        ).fetchall()
+    out: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        rule = str(row[0] or "").strip()
+        if rule and rule not in seen:
+            seen.add(rule)
+            out.append(rule)
+    return out
+
+
 def save_daily_learning_run(
     run_date,
     new_deal_customers: int,

@@ -64,10 +64,21 @@ def main():
 
     result = analyze_unlearned_deals(cfg, limit=args.limit)
 
+    from fetch_deal_salesmartly import date_tag_name, yesterday_for_run
+    from weekly_prompt_merge import count_rules_not_in_supplement
+
+    business_day = yesterday_for_run()
+    kb_stats = count_rules_not_in_supplement()
+    result["business_day"] = business_day.strftime("%Y-%m-%d")
+    result["business_date_tag"] = date_tag_name(business_day)
+    result["kb_pending"] = kb_stats.get("pending", 0)
+
     print("今日成交学习完成")
+    print(f"业务日：{result['business_day']}（标签 {result['business_date_tag']}）")
     print(f"新增待分析成交客户：{result['total']}")
     print(f"成功分析：{result['success']}")
     print(f"失败：{result['failed']}")
+    print(f"未写入知识库：{result['kb_pending']} 条")
 
     if result["errors"]:
         for err in result["errors"]:
@@ -75,8 +86,7 @@ def main():
 
     from feishu_notify import notify_daily_job_result
 
-    log_path = os.path.join(_LOG_DIR, "daily_job.log")
-    if notify_daily_job_result(result, log_path=log_path):
+    if notify_daily_job_result(result):
         print("飞书通知已发送")
     else:
         print("飞书通知未发送（未配置 Webhook 或发送失败，详见日志）")

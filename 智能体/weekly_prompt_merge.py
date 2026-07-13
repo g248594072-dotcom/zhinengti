@@ -114,6 +114,20 @@ def read_current_supplement() -> str:
     return ""
 
 
+def count_rules_not_in_supplement() -> dict:
+    """统计 DB 中尚未写入 deal_learned_supplement.md 的不重复规则数。"""
+    from db import list_distinct_agent_rules
+
+    in_db = list_distinct_agent_rules()
+    kb = set(extract_rules_from_text(read_current_supplement()))
+    not_in_kb = [r for r in in_db if r not in kb]
+    return {
+        "db_distinct": len(in_db),
+        "kb_written": len(kb),
+        "pending": len(not_in_kb),
+    }
+
+
 def extract_rules_from_text(content: str) -> list[str]:
     """从待审核 markdown 或纯文本中提取规则块。"""
     rules: list[str] = []
