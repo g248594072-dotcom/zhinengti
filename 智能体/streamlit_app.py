@@ -25,6 +25,12 @@ import qc_core as core
 # Streamlit 长驻进程会缓存已导入模块；开发时 reload 以拾取 qc_core 更新
 importlib.reload(core)
 
+def _reload_fetch_qc_salesmartly():
+    """Streamlit 长驻进程会缓存模块；拉取前 reload 以拾取 fetch_qc_salesmartly 更新。"""
+    import fetch_qc_salesmartly as mod
+    importlib.reload(mod)
+    return mod
+
 # 分析范围常量（与 qc_core 同步）
 SCOPE_TODAY = getattr(core, "TIME_SCOPE_TODAY", "today")
 SCOPE_ALL = getattr(core, "TIME_SCOPE_ALL", "all")
@@ -346,6 +352,8 @@ def _salesmartly_fetch_progress_ui(cancel_check=None):
             pct = 0.05
         elif "合并后" in msg or "日期标签下" in msg:
             pct = 0.30
+        elif "客户最近回复时间预筛" in msg:
+            pct = 0.28
         elif "拉取" in msg and "个会话" in msg:
             pct = 0.32
         elif "完整聊天" in msg:
@@ -765,7 +773,9 @@ def _render_qc_tab(cfg):
                 st.warning("请至少选择 1 位接待客服。")
             else:
                 from fetch_cancel import FetchCancelledError
-                from fetch_qc_salesmartly import fetch_qc_dataframe, dataframe_to_sessions
+                fetch_qc_mod = _reload_fetch_qc_salesmartly()
+                fetch_qc_dataframe = fetch_qc_mod.fetch_qc_dataframe
+                dataframe_to_sessions = fetch_qc_mod.dataframe_to_sessions
                 from salesmartly_client import SaleSmartlyClient, load_config
 
                 on_fetch_progress, fetch_bar, cancel_check = _begin_salesmartly_fetch()
@@ -916,7 +926,9 @@ def _render_qc_tab(cfg):
                 st.warning("请至少选择 1 位接待客服。")
             else:
                 from fetch_cancel import FetchCancelledError
-                from fetch_qc_salesmartly import fetch_qc_dataframe, dataframe_to_sessions
+                fetch_qc_mod = _reload_fetch_qc_salesmartly()
+                fetch_qc_dataframe = fetch_qc_mod.fetch_qc_dataframe
+                dataframe_to_sessions = fetch_qc_mod.dataframe_to_sessions
                 from salesmartly_client import SaleSmartlyClient, load_config
 
                 api_window = _resolve_qc_api_window(time_scope)
