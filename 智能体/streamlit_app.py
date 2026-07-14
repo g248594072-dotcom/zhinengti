@@ -744,8 +744,8 @@ def _render_qc_tab(cfg):
             st.stop()
         if api_window:
             st.caption(
-                f"粗筛：**最后沟通时间**在 **{core.format_business_day_window(api_window[0], api_window[1])}**；"
-                "精筛：窗口内**客户有发言**才进入质检。"
+                f"筛选：**客户最近回复时间**在 **{core.format_business_day_window(api_window[0], api_window[1])}**；"
+                "仅拉取这些客户的完整聊天记录进入质检。"
             )
         else:
             st.caption("分析范围为「全部」：不按最后沟通时间筛，拉取所选客服下的客户全量聊天。")
@@ -797,10 +797,12 @@ def _render_qc_tab(cfg):
 
                 if meta or sessions:
                     st.caption(
-                        f"客户 {meta.get('contacts_total', 0)} · "
+                        f"API客户 {meta.get('contacts_from_api', meta.get('contacts_total', 0))} · "
+                        f"客户回复筛选后 {meta.get('contacts_total', 0)} · "
                         f"会话 {meta.get('sessions', 0)} · "
                         f"保留 {meta.get('sessions_kept', len(sessions))} · "
-                        f"跳过无客户发言 {meta.get('skipped_no_customer_speech', 0)}"
+                        f"跳过销售单向触达 {meta.get('skipped_no_customer_reply', 0)} · "
+                        f"聊天记录校验跳过 {meta.get('skipped_no_customer_speech', 0)}"
                     )
                 if sessions:
                     scope_note = f"（{_scope_label(time_scope)}"

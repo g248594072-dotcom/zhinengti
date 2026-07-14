@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""从 SaleSmartly API 拉取质检用聊天记录（客服筛选 + 最后沟通时间 + 客户发言二次筛选）。"""
+"""从 SaleSmartly API 拉取质检用聊天记录（客服筛选 + 客户最近回复时间 + 聊天记录校验）。"""
 
 from __future__ import annotations
 
@@ -115,6 +115,47 @@ def _fetch_contacts_for_agents(
     return merged
 
 
+def _parse_api_timestamp(ts) -> Optional[datetime]:
+    """解析 API 时间戳（支持秒级或毫秒级）。"""
+    if ts is None:
+        return None
+    try:
+        val = int(ts)
+    except (TypeError, ValueError):
+        return None
+    if val <= 0:
+        return None
+    if val > 1_000_000_000_000:
+        val //= 1000
+    return datetime.fromtimestamp(val)
+
+
+def customer_replied_in_window(
+    contact: dict,
+    window: Tuple[datetime, datetime],
+) -> bool:
+    """客户最近回复时间（user_last_reply_time）是否落在业务日窗口内（左闭右开）。"""
+    dt = _parse_api_timestamp(contact.get("user_last_reply_time"))
+    if dt is None:
+        return False
+    return window[0] <= dt < window[1]
+
+
+def _filter_contacts_by_user_last_reply(
+    contacts_map: Dict[str, dict],
+    window: Tuple[datetime, datetime],
+) -> tuple[Dict[str, dict], int]:
+    """按 user_last_reply_time 预筛，返回 (保留客户, 跳过数)。"""
+    kept: Dict[str, dict] = {}
+    skipped = 0
+    for uid, contact in contacts_map.items():
+        if customer_replied_in_window(contact, window):
+            kept[uid] = contact
+        else:
+            skipped += 1
+    return kept, skipped
+
+
 def _has_customer_speech_in_window(dialog: str, window: Optional[Tuple[datetime, datetime]]) -> bool:
     if not (dialog or "").strip():
         return False
@@ -140,8 +181,8 @@ def fetch_qc_dataframe(
     """
     拉取质检用 DataFrame。
 
-    window: (start, end) 左闭右开；None 表示不按最后沟通时间筛、拉全量聊天。
-    require_customer_speech: 窗口内客户发言数 > 0 才保留。
+    window: (start, end) 左闭右开；None 表示不按时间筛客户、拉全量聊天。
+    require_customer_speech: 窗口内 user_last_reply_time 预筛 + 聊天记录校验。
     """
     config = client.config
     agent_set = set(int(x) for x in agent_ids)
@@ -161,7 +202,16 @@ def fetch_qc_dataframe(
         on_progress=on_progress,
         cancel_check=cancel_check,
     )
-    _log(f"合并后 {len(contacts_map)} 位客户（最后沟通时间筛选已应用）")
+    contacts_from_api = len(contacts_map)
+    _log(f"合并后 {contacts_from_api} 位客户（API 最后沟通时间粗筛已应用）")
+
+    skipped_no_reply = 0
+    if window is not None and require_customer_speech:
+        contacts_map, skipped_no_reply = _filter_contacts_by_user_last_reply(contacts_map, window)
+        _log(
+            f"客户最近回复时间预筛：保留 {len(contacts_map)} 人，"
+            f"跳过销售单向触达/窗口外回复 {skipped_no_reply} 人"
+        )
 
     session_ids: List[str] = []
     seen_sids: Set[str] = set()
@@ -176,7 +226,9 @@ def fetch_qc_dataframe(
             "联系人", "会话ID", "接待成员", "社媒渠道", "会话消息内容",
         ])
         return empty, {
+            "contacts_from_api": contacts_from_api,
             "contacts_total": len(contacts_map),
+            "skipped_no_customer_reply": skipped_no_reply,
             "sessions": 0,
             "sessions_kept": 0,
             "skipped_no_customer_speech": 0,
@@ -269,13 +321,18 @@ def fetch_qc_dataframe(
         df.columns = df.columns.str.strip()
 
     meta = {
+        "contacts_from_api": contacts_from_api,
         "contacts_total": len(contacts_map),
+        "skipped_no_customer_reply": skipped_no_reply,
         "sessions": len(session_ids),
         "sessions_kept": len(rows),
         "skipped_no_customer_speech": skipped_no_speech,
         "agent_count": len(agent_set),
     }
-    _log(f"完成：保留 {len(rows)} 通会话，跳过无客户发言 {skipped_no_speech}")
+    _log(
+        f"完成：保留 {len(rows)} 通会话，"
+        f"回复时间预筛跳过 {skipped_no_reply}，聊天记录校验跳过 {skipped_no_speech}"
+    )
     return df, meta
 
 
