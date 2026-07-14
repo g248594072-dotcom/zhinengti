@@ -7,6 +7,7 @@
 import io
 import importlib
 import os
+import re
 import sys
 import time
 from datetime import datetime, timedelta
@@ -308,6 +309,50 @@ def _render_qc_agent_selector(member_groups: dict, member_id_to_name: dict) -> l
                 col_i += 1
 
     return _get_selected_qc_agent_ids(member_groups)
+
+
+def _salesmartly_fetch_progress_ui():
+    """SaleSmartly 拉取进度条与最近日志（供 fetch_qc / fetch_deal 共用）。"""
+    progress = st.progress(0, text="准备拉取 SaleSmartly 数据…")
+    status = st.empty()
+    logs: list[str] = []
+
+    def on_progress(msg: str) -> None:
+        logs.append(msg)
+        if len(logs) > 8:
+            logs.pop(0)
+        status.markdown("**拉取进度**\n\n" + "\n\n".join(f"- {l}" for l in logs))
+
+        pct = 0.0
+        bar_text = msg
+        if m := re.search(r"聊天记录 (\d+)/(\d+)", msg):
+            done, total = int(m.group(1)), max(int(m.group(2)), 1)
+            pct = 0.45 + 0.55 * (done / total)
+            bar_text = f"拉取聊天记录 {done}/{total}"
+        elif m := re.search(r"客服客户列表 (\d+)/(\d+)", msg):
+            done, total = int(m.group(1)), max(int(m.group(2)), 1)
+            pct = 0.08 + 0.22 * (done / total)
+            bar_text = f"拉取客户列表 {done}/{total}"
+        elif m := re.search(r"会话详情 (\d+)/(\d+)", msg):
+            done, total = int(m.group(1)), max(int(m.group(2)), 1)
+            pct = 0.32 + 0.12 * (done / total)
+            bar_text = f"拉取会话详情 {done}/{total}"
+        elif "查找日期标签" in msg or "拉取标签客户" in msg:
+            pct = 0.03
+        elif "并行拉取" in msg and "客服" in msg:
+            pct = 0.05
+        elif "合并后" in msg or "日期标签下" in msg:
+            pct = 0.30
+        elif "拉取" in msg and "个会话" in msg:
+            pct = 0.32
+        elif "完整聊天" in msg:
+            pct = 0.42
+        elif "完成" in msg:
+            pct = 1.0
+
+        progress.progress(min(pct, 1.0), text=bar_text)
+
+    return on_progress, progress
 
 
 def _qc_concurrency_control(cfg: dict) -> int:
@@ -709,24 +754,26 @@ def _render_qc_tab(cfg):
                 from fetch_qc_salesmartly import fetch_qc_dataframe, dataframe_to_sessions
                 from salesmartly_client import SaleSmartlyClient, load_config
 
-                with st.spinner("正在并行拉取 SaleSmartly 数据…"):
-                    try:
-                        client = SaleSmartlyClient(load_config())
-                        df, meta = fetch_qc_dataframe(
-                            client,
-                            agent_ids,
-                            window=api_window,
-                            require_customer_speech=True,
-                        )
-                        custom_w = api_window if time_scope == SCOPE_CUSTOM else None
-                        sessions, window = dataframe_to_sessions(
-                            df, time_scope=time_scope, custom_window=custom_w
-                        )
-                    except Exception as e:
-                        st.error(f"拉取失败：{core.redact_secrets(str(e), cfg)}")
-                        sessions = []
-                        meta = {}
-                        window = None
+                on_fetch_progress, fetch_bar = _salesmartly_fetch_progress_ui()
+                try:
+                    client = SaleSmartlyClient(load_config())
+                    df, meta = fetch_qc_dataframe(
+                        client,
+                        agent_ids,
+                        window=api_window,
+                        require_customer_speech=True,
+                        on_progress=on_fetch_progress,
+                    )
+                    custom_w = api_window if time_scope == SCOPE_CUSTOM else None
+                    sessions, window = dataframe_to_sessions(
+                        df, time_scope=time_scope, custom_window=custom_w
+                    )
+                    fetch_bar.progress(1.0, text="拉取完成")
+                except Exception as e:
+                    st.error(f"拉取失败：{core.redact_secrets(str(e), cfg)}")
+                    sessions = []
+                    meta = {}
+                    window = None
 
                 st.caption(
                     f"客户 {meta.get('contacts_total', 0)} · "
@@ -853,22 +900,24 @@ def _render_qc_tab(cfg):
                     st.error("自定义时间窗口无效。")
                 else:
                     agent_ids = _get_selected_qc_agent_ids(_cached_salesmartly_members()[1])
-                    with st.spinner("正在并行拉取 SaleSmartly 数据…"):
-                        try:
-                            client = SaleSmartlyClient(load_config())
-                            df, _meta = fetch_qc_dataframe(
-                                client,
-                                agent_ids,
-                                window=api_window,
-                                require_customer_speech=True,
-                            )
-                            custom_w = api_window if time_scope == SCOPE_CUSTOM else None
-                            sessions, window = dataframe_to_sessions(
-                                df, time_scope=time_scope, custom_window=custom_w
-                            )
-                        except Exception as e:
-                            st.error(f"拉取失败：{core.redact_secrets(str(e), cfg)}")
-                            sessions = None
+                    on_fetch_progress, fetch_bar = _salesmartly_fetch_progress_ui()
+                    try:
+                        client = SaleSmartlyClient(load_config())
+                        df, _meta = fetch_qc_dataframe(
+                            client,
+                            agent_ids,
+                            window=api_window,
+                            require_customer_speech=True,
+                            on_progress=on_fetch_progress,
+                        )
+                        custom_w = api_window if time_scope == SCOPE_CUSTOM else None
+                        sessions, window = dataframe_to_sessions(
+                            df, time_scope=time_scope, custom_window=custom_w
+                        )
+                        fetch_bar.progress(1.0, text="拉取完成")
+                    except Exception as e:
+                        st.error(f"拉取失败：{core.redact_secrets(str(e), cfg)}")
+                        sessions = None
 
                     if sessions is None:
                         pass
@@ -1540,12 +1589,16 @@ def _render_deal_import_tab(cfg):
         if preview_api or import_api:
             from fetch_deal_daily import run_fetch_deal_daily
 
-            with st.spinner("正在从 SaleSmartly 拉取…"):
-                try:
-                    api_result = run_fetch_deal_daily(dry_run=preview_api)
-                except Exception as e:
-                    st.error(f"拉取失败：{core.redact_secrets(str(e), cfg)}")
-                    api_result = None
+            on_fetch_progress, fetch_bar = _salesmartly_fetch_progress_ui()
+            try:
+                api_result = run_fetch_deal_daily(
+                    dry_run=preview_api,
+                    on_progress=on_fetch_progress,
+                )
+                fetch_bar.progress(1.0, text="拉取完成")
+            except Exception as e:
+                st.error(f"拉取失败：{core.redact_secrets(str(e), cfg)}")
+                api_result = None
 
             if api_result is not None:
                 meta = api_result.get("meta") or {}

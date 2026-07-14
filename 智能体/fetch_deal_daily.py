@@ -54,6 +54,7 @@ def run_fetch_deal_daily(
     *,
     target_day: datetime | None = None,
     dry_run: bool = False,
+    on_progress=None,
 ) -> dict:
     from deal_import_core import execute_deal_import, get_mysql_target_label, load_import_config
     from fetch_deal_salesmartly import fetch_yesterday_deal_dataframe, yesterday_for_run
@@ -82,13 +83,18 @@ def run_fetch_deal_daily(
         return out
 
     try:
+        def _report_progress(msg: str) -> None:
+            if on_progress:
+                on_progress(msg)
+            logger.info(msg)
+
         df, meta = fetch_yesterday_deal_dataframe(
             client,
             target_day=day,
             deal_keywords=sm_settings["deal_tag_keywords"],
             date_label_category=sm_settings["date_label_category"],
             date_label_name=sm_settings["date_label_name"],
-            on_progress=lambda m: logger.info(m),
+            on_progress=_report_progress,
         )
     except Exception as e:
         out["error"] = f"SaleSmartly 拉取失败：{e}"

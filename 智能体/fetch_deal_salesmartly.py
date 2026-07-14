@@ -342,11 +342,17 @@ def _fetch_contacts_by_tag_value(
     return contacts_by_uid
 
 
-def _fetch_sessions_by_ids(config: Config, session_ids: List[str]) -> List[dict]:
+def _fetch_sessions_by_ids(
+    config: Config,
+    session_ids: List[str],
+    on_progress: Optional[Callable[[int, int], None]] = None,
+) -> List[dict]:
     if not session_ids:
         return []
 
     sessions: List[dict] = []
+    total = len(session_ids)
+    done = 0
 
     def _fetch_one(session_id: str) -> Optional[dict]:
         try:
@@ -364,13 +370,16 @@ def _fetch_sessions_by_ids(config: Config, session_ids: List[str]) -> List[dict]
         except Exception:
             return None
 
-    workers = min(DEFAULT_MAX_WORKERS, max(1, len(session_ids)))
+    workers = min(DEFAULT_MAX_WORKERS, max(1, total))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_fetch_one, sid): sid for sid in session_ids}
         for fut in as_completed(futures):
             session = fut.result()
             if session:
                 sessions.append(session)
+            done += 1
+            if on_progress:
+                on_progress(done, total)
     return sessions
 
 
@@ -480,7 +489,12 @@ def fetch_yesterday_deal_dataframe(
             session_ids.append(sid)
 
     _log(f"拉取 {len(session_ids)} 个会话…")
-    sessions = _fetch_sessions_by_ids(config, session_ids)
+
+    def _session_progress(done: int, total: int) -> None:
+        if on_progress:
+            on_progress(f"会话详情 {done}/{total}")
+
+    sessions = _fetch_sessions_by_ids(config, session_ids, on_progress=_session_progress)
     session_by_id = {str(s.get("session_id") or ""): s for s in sessions if s.get("session_id")}
 
     missing = [sid for sid in session_ids if sid not in session_by_id]

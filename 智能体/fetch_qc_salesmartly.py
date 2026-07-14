@@ -169,7 +169,11 @@ def fetch_qc_dataframe(
         }
 
     _log(f"并行拉取 {len(session_ids)} 个会话详情…")
-    sessions = _fetch_sessions_by_ids(config, session_ids)
+
+    def _session_progress(done: int, total: int) -> None:
+        _log(f"会话详情 {done}/{total}")
+
+    sessions = _fetch_sessions_by_ids(config, session_ids, on_progress=_session_progress)
     session_by_id = {str(s.get("session_id") or ""): s for s in sessions if s.get("session_id")}
 
     def _msg_progress(done: int, total: int, msg_count: int) -> None:
