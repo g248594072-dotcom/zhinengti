@@ -12,6 +12,7 @@ from typing import Callable, Dict, List, Optional, Set
 
 import pandas as pd
 
+from fetch_cancel import CancelCheck, raise_if_cancelled
 from salesmartly_client import (
     Config,
     DEFAULT_MAX_WORKERS,
@@ -346,6 +347,7 @@ def _fetch_sessions_by_ids(
     config: Config,
     session_ids: List[str],
     on_progress: Optional[Callable[[int, int], None]] = None,
+    cancel_check: Optional[CancelCheck] = None,
 ) -> List[dict]:
     if not session_ids:
         return []
@@ -355,6 +357,8 @@ def _fetch_sessions_by_ids(
     done = 0
 
     def _fetch_one(session_id: str) -> Optional[dict]:
+        if cancel_check and cancel_check():
+            return None
         try:
             data = SaleSmartlyClient(config).get(
                 "/api/v2/get-session-list",
@@ -374,6 +378,7 @@ def _fetch_sessions_by_ids(
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_fetch_one, sid): sid for sid in session_ids}
         for fut in as_completed(futures):
+            raise_if_cancelled(cancel_check)
             session = fut.result()
             if session:
                 sessions.append(session)
@@ -387,6 +392,7 @@ def _fetch_messages_for_sessions(
     config: Config,
     session_ids: List[str],
     on_progress: Optional[Callable[[int, int, int], None]] = None,
+    cancel_check: Optional[CancelCheck] = None,
 ) -> Dict[str, List[dict]]:
     if not session_ids:
         return {}
@@ -394,12 +400,15 @@ def _fetch_messages_for_sessions(
     grouped: Dict[str, List[dict]] = {}
 
     def _fetch_one(session_id: str) -> tuple[str, List[dict]]:
+        if cancel_check and cancel_check():
+            return session_id, []
         client = SaleSmartlyClient(config)
         items, _ = client.get_all_pages(
             "/api/v2/get-all-message-list",
             {"session_id": session_id},
             page_size=DEFAULT_PAGE_SIZE,
             max_pages=100,
+            cancel_check=cancel_check,
         )
         items.sort(key=lambda m: m.get("send_time") or 0)
         return session_id, items
@@ -411,6 +420,7 @@ def _fetch_messages_for_sessions(
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {pool.submit(_fetch_one, sid): sid for sid in session_ids}
         for fut in as_completed(futures):
+            raise_if_cancelled(cancel_check)
             sid, items = fut.result()
             if items:
                 grouped[sid] = items
@@ -418,6 +428,7 @@ def _fetch_messages_for_sessions(
             done += 1
             if on_progress:
                 on_progress(done, total, msg_count)
+        raise_if_cancelled(cancel_check)
 
     return grouped
 
@@ -430,6 +441,7 @@ def fetch_yesterday_deal_dataframe(
     date_label_category: str = "澳大利亚",
     date_label_name: str = "日期",
     on_progress: Optional[Callable[[str], None]] = None,
+    cancel_check: Optional[CancelCheck] = None,
 ) -> tuple[pd.DataFrame, dict]:
     """
     拉取指定业务日（默认昨天）带成交标签的客户聊天记录。
@@ -494,7 +506,9 @@ def fetch_yesterday_deal_dataframe(
         if on_progress:
             on_progress(f"会话详情 {done}/{total}")
 
-    sessions = _fetch_sessions_by_ids(config, session_ids, on_progress=_session_progress)
+    sessions = _fetch_sessions_by_ids(
+        config, session_ids, on_progress=_session_progress, cancel_check=cancel_check
+    )
     session_by_id = {str(s.get("session_id") or ""): s for s in sessions if s.get("session_id")}
 
     missing = [sid for sid in session_ids if sid not in session_by_id]
@@ -508,7 +522,10 @@ def fetch_yesterday_deal_dataframe(
             on_progress(f"聊天记录 {done}/{total}，共 {msg_count} 条")
 
     messages_by_session = _fetch_messages_for_sessions(
-        config, list(session_by_id.keys()), on_progress=_msg_progress
+        config,
+        list(session_by_id.keys()),
+        on_progress=_msg_progress,
+        cancel_check=cancel_check,
     )
 
     members = fetch_members(client)

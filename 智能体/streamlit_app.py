@@ -311,13 +311,16 @@ def _render_qc_agent_selector(member_groups: dict, member_id_to_name: dict) -> l
     return _get_selected_qc_agent_ids(member_groups)
 
 
-def _salesmartly_fetch_progress_ui():
-    """SaleSmartly 拉取进度条与最近日志（供 fetch_qc / fetch_deal 共用）。"""
+def _salesmartly_fetch_progress_ui(cancel_check=None):
+    """SaleSmartly 拉取进度条与最近日志；cancel_check 用于进度回调中检测断连。"""
+    from fetch_cancel import raise_if_cancelled
+
     progress = st.progress(0, text="准备拉取 SaleSmartly 数据…")
     status = st.empty()
     logs: list[str] = []
 
     def on_progress(msg: str) -> None:
+        raise_if_cancelled(cancel_check)
         logs.append(msg)
         if len(logs) > 8:
             logs.pop(0)
@@ -353,6 +356,16 @@ def _salesmartly_fetch_progress_ui():
         progress.progress(min(pct, 1.0), text=bar_text)
 
     return on_progress, progress
+
+
+def _begin_salesmartly_fetch():
+    """初始化拉取 UI，返回 (on_progress, progress_bar, cancel_check)。"""
+    from streamlit_fetch_cancel import make_streamlit_cancel_check
+
+    st.caption("关闭本浏览器标签页将自动停止拉取。")
+    cancel_check, _ = make_streamlit_cancel_check()
+    on_progress, progress = _salesmartly_fetch_progress_ui(cancel_check)
+    return on_progress, progress, cancel_check
 
 
 def _qc_concurrency_control(cfg: dict) -> int:
@@ -751,10 +764,14 @@ def _render_qc_tab(cfg):
             if not agent_ids:
                 st.warning("请至少选择 1 位接待客服。")
             else:
+                from fetch_cancel import FetchCancelledError
                 from fetch_qc_salesmartly import fetch_qc_dataframe, dataframe_to_sessions
                 from salesmartly_client import SaleSmartlyClient, load_config
 
-                on_fetch_progress, fetch_bar = _salesmartly_fetch_progress_ui()
+                on_fetch_progress, fetch_bar, cancel_check = _begin_salesmartly_fetch()
+                sessions = []
+                meta = {}
+                window = None
                 try:
                     client = SaleSmartlyClient(load_config())
                     df, meta = fetch_qc_dataframe(
@@ -763,24 +780,28 @@ def _render_qc_tab(cfg):
                         window=api_window,
                         require_customer_speech=True,
                         on_progress=on_fetch_progress,
+                        cancel_check=cancel_check,
                     )
                     custom_w = api_window if time_scope == SCOPE_CUSTOM else None
                     sessions, window = dataframe_to_sessions(
                         df, time_scope=time_scope, custom_window=custom_w
                     )
                     fetch_bar.progress(1.0, text="拉取完成")
+                except FetchCancelledError:
+                    st.warning("拉取已取消（页面已关闭或连接已断开）。")
                 except Exception as e:
                     st.error(f"拉取失败：{core.redact_secrets(str(e), cfg)}")
                     sessions = []
                     meta = {}
                     window = None
 
-                st.caption(
-                    f"客户 {meta.get('contacts_total', 0)} · "
-                    f"会话 {meta.get('sessions', 0)} · "
-                    f"保留 {meta.get('sessions_kept', len(sessions))} · "
-                    f"跳过无客户发言 {meta.get('skipped_no_customer_speech', 0)}"
-                )
+                if meta or sessions:
+                    st.caption(
+                        f"客户 {meta.get('contacts_total', 0)} · "
+                        f"会话 {meta.get('sessions', 0)} · "
+                        f"保留 {meta.get('sessions_kept', len(sessions))} · "
+                        f"跳过无客户发言 {meta.get('skipped_no_customer_speech', 0)}"
+                    )
                 if sessions:
                     scope_note = f"（{_scope_label(time_scope)}"
                     if window:
@@ -892,6 +913,7 @@ def _render_qc_tab(cfg):
             if not api_ready:
                 st.warning("请至少选择 1 位接待客服。")
             else:
+                from fetch_cancel import FetchCancelledError
                 from fetch_qc_salesmartly import fetch_qc_dataframe, dataframe_to_sessions
                 from salesmartly_client import SaleSmartlyClient, load_config
 
@@ -900,7 +922,8 @@ def _render_qc_tab(cfg):
                     st.error("自定义时间窗口无效。")
                 else:
                     agent_ids = _get_selected_qc_agent_ids(_cached_salesmartly_members()[1])
-                    on_fetch_progress, fetch_bar = _salesmartly_fetch_progress_ui()
+                    on_fetch_progress, fetch_bar, cancel_check = _begin_salesmartly_fetch()
+                    sessions = None
                     try:
                         client = SaleSmartlyClient(load_config())
                         df, _meta = fetch_qc_dataframe(
@@ -909,12 +932,15 @@ def _render_qc_tab(cfg):
                             window=api_window,
                             require_customer_speech=True,
                             on_progress=on_fetch_progress,
+                            cancel_check=cancel_check,
                         )
                         custom_w = api_window if time_scope == SCOPE_CUSTOM else None
                         sessions, window = dataframe_to_sessions(
                             df, time_scope=time_scope, custom_window=custom_w
                         )
                         fetch_bar.progress(1.0, text="拉取完成")
+                    except FetchCancelledError:
+                        st.warning("拉取已取消（页面已关闭或连接已断开）。")
                     except Exception as e:
                         st.error(f"拉取失败：{core.redact_secrets(str(e), cfg)}")
                         sessions = None
@@ -1587,15 +1613,20 @@ def _render_deal_import_tab(cfg):
             import_api = st.button("拉取昨日成交并导入", type="primary", key="deal_api_import")
 
         if preview_api or import_api:
+            from fetch_cancel import FetchCancelledError
             from fetch_deal_daily import run_fetch_deal_daily
 
-            on_fetch_progress, fetch_bar = _salesmartly_fetch_progress_ui()
+            on_fetch_progress, fetch_bar, cancel_check = _begin_salesmartly_fetch()
+            api_result = None
             try:
                 api_result = run_fetch_deal_daily(
                     dry_run=preview_api,
                     on_progress=on_fetch_progress,
+                    cancel_check=cancel_check,
                 )
                 fetch_bar.progress(1.0, text="拉取完成")
+            except FetchCancelledError:
+                st.warning("拉取已取消（页面已关闭或连接已断开）。")
             except Exception as e:
                 st.error(f"拉取失败：{core.redact_secrets(str(e), cfg)}")
                 api_result = None

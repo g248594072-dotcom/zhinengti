@@ -12,6 +12,7 @@ from typing import Callable, Dict, List, Optional, Set, Tuple
 import pandas as pd
 
 import qc_core as core
+from fetch_cancel import CancelCheck, raise_if_cancelled
 from fetch_deal_salesmartly import (
     CHANNEL_MAP,
     _fetch_messages_for_sessions,
@@ -48,6 +49,7 @@ def _fetch_contacts_for_agent(
     agent_id: int,
     *,
     window: Optional[Tuple[datetime, datetime]] = None,
+    cancel_check: Optional[CancelCheck] = None,
 ) -> Dict[str, dict]:
     params: Dict[str, str] = {
         "updated_time": _wide_updated_time_range(),
@@ -61,6 +63,7 @@ def _fetch_contacts_for_agent(
         params,
         page_size=100,
         max_pages=200,
+        cancel_check=cancel_check,
     )
     out: Dict[str, dict] = {}
     for contact in items:
@@ -76,6 +79,7 @@ def _fetch_contacts_for_agents(
     *,
     window: Optional[Tuple[datetime, datetime]] = None,
     on_progress: Optional[Callable[[str], None]] = None,
+    cancel_check: Optional[CancelCheck] = None,
 ) -> Dict[str, dict]:
     if not agent_ids:
         return {}
@@ -91,9 +95,13 @@ def _fetch_contacts_for_agents(
     _log(f"并行拉取 {len(agent_ids)} 位客服的客户列表…")
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_fetch_contacts_for_agent, config, aid, window=window): aid for aid in agent_ids}
+        futures = {
+            pool.submit(_fetch_contacts_for_agent, config, aid, window=window, cancel_check=cancel_check): aid
+            for aid in agent_ids
+        }
         done = 0
         for fut in as_completed(futures):
+            raise_if_cancelled(cancel_check)
             aid = futures[fut]
             try:
                 part = fut.result()
@@ -103,6 +111,7 @@ def _fetch_contacts_for_agents(
             done += 1
             _log(f"客服客户列表 {done}/{len(agent_ids)}，累计 {len(merged)} 人")
 
+    raise_if_cancelled(cancel_check)
     return merged
 
 
@@ -126,6 +135,7 @@ def fetch_qc_dataframe(
     window: Optional[Tuple[datetime, datetime]] = None,
     require_customer_speech: bool = True,
     on_progress: Optional[Callable[[str], None]] = None,
+    cancel_check: Optional[CancelCheck] = None,
 ) -> tuple[pd.DataFrame, dict]:
     """
     拉取质检用 DataFrame。
@@ -145,7 +155,11 @@ def fetch_qc_dataframe(
         raise ValueError("请至少选择 1 位接待客服")
 
     contacts_map = _fetch_contacts_for_agents(
-        config, sorted(agent_set), window=window, on_progress=on_progress
+        config,
+        sorted(agent_set),
+        window=window,
+        on_progress=on_progress,
+        cancel_check=cancel_check,
     )
     _log(f"合并后 {len(contacts_map)} 位客户（最后沟通时间筛选已应用）")
 
@@ -173,7 +187,9 @@ def fetch_qc_dataframe(
     def _session_progress(done: int, total: int) -> None:
         _log(f"会话详情 {done}/{total}")
 
-    sessions = _fetch_sessions_by_ids(config, session_ids, on_progress=_session_progress)
+    sessions = _fetch_sessions_by_ids(
+        config, session_ids, on_progress=_session_progress, cancel_check=cancel_check
+    )
     session_by_id = {str(s.get("session_id") or ""): s for s in sessions if s.get("session_id")}
 
     def _msg_progress(done: int, total: int, msg_count: int) -> None:
@@ -182,7 +198,10 @@ def fetch_qc_dataframe(
 
     _log("并行拉取完整聊天记录…")
     messages_by_session = _fetch_messages_for_sessions(
-        config, list(session_by_id.keys()), on_progress=_msg_progress
+        config,
+        list(session_by_id.keys()),
+        on_progress=_msg_progress,
+        cancel_check=cancel_check,
     )
 
     members = fetch_members(client)
@@ -191,6 +210,7 @@ def fetch_qc_dataframe(
     rows = []
     skipped_no_speech = 0
     for uid, contact in contacts_map.items():
+        raise_if_cancelled(cancel_check)
         session_id = str(contact.get("session_id") or "").strip()
         if not session_id:
             continue
