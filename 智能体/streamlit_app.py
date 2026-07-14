@@ -26,8 +26,10 @@ import qc_core as core
 importlib.reload(core)
 
 def _reload_fetch_qc_salesmartly():
-    """Streamlit 长驻进程会缓存模块；拉取前 reload 以拾取 fetch_qc_salesmartly 更新。"""
+    """Streamlit 长驻进程会缓存模块；拉取前 reload 以拾取 fetch 相关更新。"""
+    import fetch_deal_salesmartly as deal_mod
     import fetch_qc_salesmartly as mod
+    importlib.reload(deal_mod)
     importlib.reload(mod)
     return mod
 

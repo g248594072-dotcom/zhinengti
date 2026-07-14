@@ -15,14 +15,13 @@ import qc_core as core
 from fetch_cancel import CancelCheck, raise_if_cancelled
 from fetch_deal_salesmartly import (
     CHANNEL_MAP,
-    _fetch_messages_for_sessions,
-    _fetch_sessions_by_ids,
     _format_message_line,
     _should_include_in_transcript,
     build_member_maps,
     fetch_members,
     member_display_name,
 )
+import fetch_deal_salesmartly as _deal_fetch
 from salesmartly_client import Config, DEFAULT_MAX_WORKERS, SaleSmartlyClient
 
 logger = logging.getLogger(__name__)
@@ -239,7 +238,7 @@ def fetch_qc_dataframe(
     def _session_progress(done: int, total: int) -> None:
         _log(f"会话详情 {done}/{total}")
 
-    sessions = _fetch_sessions_by_ids(
+    sessions = _deal_fetch._fetch_sessions_by_ids(
         config, session_ids, on_progress=_session_progress, cancel_check=cancel_check
     )
     session_by_id = {str(s.get("session_id") or ""): s for s in sessions if s.get("session_id")}
@@ -249,7 +248,7 @@ def fetch_qc_dataframe(
             on_progress(f"聊天记录 {done}/{total}，共 {msg_count} 条")
 
     _log("并行拉取完整聊天记录…")
-    messages_by_session = _fetch_messages_for_sessions(
+    messages_by_session = _deal_fetch._fetch_messages_for_sessions(
         config,
         list(session_by_id.keys()),
         on_progress=_msg_progress,
