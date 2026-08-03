@@ -556,15 +556,22 @@ def _execute_qc_run(
     st.success(done_msg)
 
     try:
-        from db import save_qc_results, mark_deal_customers_from_qc, mark_deleted_customers_from_qc
+        from db import save_qc_results, mark_deal_customers_from_qc
 
         save_result = save_qc_results(results)
         deal_result = mark_deal_customers_from_qc(results)
-        delete_result = mark_deleted_customers_from_qc(results)
+        delete_msg = ""
+        try:
+            from db import mark_deleted_customers_from_qc
+
+            delete_result = mark_deleted_customers_from_qc(results)
+            delete_msg = f"；标记删除客户：{delete_result['deleted_customers']} 个"
+        except ImportError:
+            delete_msg = "（删除客户标记未启用：请更新 db.py）"
         st.info(
             f"质检结果已入库：{save_result['saved']} 条；"
-            f"新增/更新成交客户：{deal_result['deal_customers']} 个；"
-            f"标记删除客户：{delete_result['deleted_customers']} 个"
+            f"新增/更新成交客户：{deal_result['deal_customers']} 个"
+            f"{delete_msg}"
         )
         if save_result.get("skipped"):
             st.warning(

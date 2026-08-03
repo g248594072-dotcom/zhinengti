@@ -6,7 +6,9 @@ from __future__ import annotations
 from typing import Any
 
 import qc_core as core
-from db import init_db, mark_sessions_as_deleted, upsert_sessions
+from sqlalchemy import text
+
+from db import get_engine, init_db, normalize_session_id, upsert_sessions
 from deal_import_core import (
     _dedupe_sessions,
     empty_summary,
@@ -14,6 +16,33 @@ from deal_import_core import (
     get_mysql_target_label,
     load_import_config,
 )
+
+
+def mark_sessions_as_deleted(sessions: list[dict]) -> int:
+    """将会话对应客户标记为已删除（不覆盖已成交）。"""
+    init_db()
+    engine = get_engine()
+    marked = 0
+    with engine.begin() as conn:
+        for session in sessions:
+            try:
+                sid = normalize_session_id(session)
+            except ValueError:
+                continue
+            result = conn.execute(
+                text("""
+                    UPDATE customers c
+                    JOIN chat_sessions s ON s.customer_id = c.id
+                    SET c.status = '已删除',
+                        c.deleted_at = COALESCE(c.deleted_at, NOW()),
+                        c.updated_at = NOW()
+                    WHERE s.original_session_id = :sid
+                      AND c.status != '已成交'
+                """),
+                {"sid": sid},
+            )
+            marked += result.rowcount or 0
+    return marked
 
 
 def empty_delete_summary() -> dict:
