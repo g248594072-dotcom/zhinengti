@@ -30,6 +30,8 @@ def load_import_config() -> dict:
                 "import_last_dir": "",
                 "salesmartly": {
                     "deal_tag_keywords": ["全款", "定金", "分期"],
+                    "delete_tag_keywords": ["删", "删除", "拉黑", "拒收"],
+                    "blacklist_tag_keywords": ["黑粉"],
                     "date_label_category": "澳大利亚",
                     "date_label_name": "日期",
                 },

@@ -15,5 +15,15 @@
   "deal_learn_incremental_enabled": true,
   "deal_learn_ref_limit": 3,
   "deal_learn_max_dialog_chars": 8000,
-  "deal_learn_coverage_llm": false
+  "deal_learn_coverage_llm": false,
+  "delete_context_enabled": true,
+  "delete_context_limit": 3,
+  "delete_context_prefer_today": true,
+  "delete_learn_skip_score": 6.0,
+  "delete_learn_incremental_score": 3.0,
+  "delete_learn_incremental_enabled": true,
+  "delete_learn_ref_limit": 3,
+  "delete_learn_max_dialog_chars": 8000,
+  "delete_learn_coverage_llm": false,
+  "delete_learn_deal_compare_limit": 2
 }

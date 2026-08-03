@@ -65,17 +65,23 @@ def load_prompt(filename):
 
 
 def enrich_system_prompt(base: str, tier: str = "full") -> str:
-    """合并已审核的成交复盘规则补充（prompts/deal_learned_supplement.md）。"""
+    """合并已审核的成交/删除复盘规则补充。"""
     if tier in ("deep_review", "progress_compare"):
         return base
+    base = _append_learned_supplement(base, "deal_learned_supplement.md", "成交复盘沉淀规则（已审核合并）")
+    base = _append_learned_supplement(base, "delete_learned_supplement.md", "删除复盘沉淀规则（流失规避）")
+    return base
+
+
+def _append_learned_supplement(base: str, filename: str, heading: str) -> str:
     try:
-        sup = load_prompt("deal_learned_supplement.md")
+        sup = load_prompt(filename)
     except FileNotFoundError:
         return base
     sup = re.sub(r"<!--[\s\S]*?-->", "", sup or "").strip()
     if not sup:
         return base
-    return base + "\n\n# 成交复盘沉淀规则（已审核合并）\n" + sup
+    return base + f"\n\n# {heading}\n" + sup
 
 
 # ============================================================
@@ -1459,7 +1465,7 @@ def call_llm_prompt(cfg, system_prompt, user_prompt, max_chars=None, truncate=Tr
     return {"_错误": redact_secrets(last_err or "未知错误", cfg)}
 
 
-def call_llm(cfg, dialog_text, tier="full", note=None, deal_reference=None):
+def call_llm(cfg, dialog_text, tier="full", note=None, deal_reference=None, delete_reference=None):
     if tier == "light":
         system_prompt = enrich_system_prompt(load_prompt("lite_qc.md"), tier)
         max_chars = LITE_MAX_CHARS
@@ -1482,6 +1488,8 @@ def call_llm(cfg, dialog_text, tier="full", note=None, deal_reference=None):
     prefix_parts = []
     if deal_reference:
         prefix_parts.append(deal_reference.strip())
+    if delete_reference:
+        prefix_parts.append(delete_reference.strip())
     if note:
         prefix_parts.append(note.strip())
     prefix = "\n\n".join(prefix_parts)
@@ -1564,6 +1572,22 @@ _FULL_HISTORY_NOTE = (
 )
 
 
+def _resolve_delete_context(cfg, dialog: str, use_delete_context: bool | None) -> tuple[str, list, str, str]:
+    enabled = cfg.get("delete_context_enabled", True) if use_delete_context is None else bool(use_delete_context)
+    if not enabled:
+        return "", [], "", ""
+    try:
+        from delete_context import get_delete_context_for_qc, summarize_delete_refs
+
+        note, records = get_delete_context_for_qc(dialog, cfg)
+        summary = summarize_delete_refs(records)
+        count = str(len(records)) if records else ""
+        return note, records, count, summary
+    except Exception as e:
+        logger.warning("删除经验检索失败: %s", e)
+        return "", [], "", ""
+
+
 def _resolve_deal_context(cfg, dialog: str, use_deal_context: bool | None) -> tuple[str, list, str, str]:
     """返回 (reference_note, deals, count_label, summary)。"""
     enabled = cfg.get("deal_context_enabled", True) if use_deal_context is None else bool(use_deal_context)
@@ -1596,6 +1620,8 @@ def qc_one_session(cfg, session, *, use_deal_context=None):
         "原始对话": session["对话"],
         "成交参考案例数": "",
         "成交参考摘要": "",
+        "删除参考案例数": "",
+        "删除参考摘要": "",
     }
     if tier == "skip":
         row["结果标签"] = "规则筛选"
@@ -1605,25 +1631,40 @@ def qc_one_session(cfg, session, *, use_deal_context=None):
         deal_ref, _deals, ref_count, ref_summary = _resolve_deal_context(
             cfg, session["对话"], use_deal_context
         )
+        delete_ref, _deletes, del_count, del_summary = _resolve_delete_context(
+            cfg, session["对话"], use_deal_context
+        )
         row["成交参考案例数"] = ref_count
         row["成交参考摘要"] = ref_summary
+        row["删除参考案例数"] = del_count
+        row["删除参考摘要"] = del_summary
 
-        res = call_llm(cfg, session["对话"], tier=tier, deal_reference=deal_ref or None)
+        res = call_llm(
+            cfg, session["对话"], tier=tier,
+            deal_reference=deal_ref or None,
+            delete_reference=delete_ref or None,
+        )
         full_dialog = session.get("对话_全量")
         if (full_dialog and full_dialog.strip() != (session["对话"] or "").strip()
                 and _suspect_missing_opening(res)):
             full_ref, _, full_count, full_summary = _resolve_deal_context(
                 cfg, full_dialog, use_deal_context
             )
+            full_del_ref, _, full_del_count, full_del_summary = _resolve_delete_context(
+                cfg, full_dialog, use_deal_context
+            )
             res_full = call_llm(
                 cfg, full_dialog, tier="full",
                 note=_FULL_HISTORY_NOTE,
                 deal_reference=full_ref or None,
+                delete_reference=full_del_ref or None,
             )
             if isinstance(res_full, dict) and "_错误" not in res_full:
                 res = res_full
                 row["成交参考案例数"] = full_count or ref_count
                 row["成交参考摘要"] = full_summary or ref_summary
+                row["删除参考案例数"] = full_del_count or del_count
+                row["删除参考摘要"] = full_del_summary or del_summary
                 res["改进建议"] = ("【已结合完整历史复核】 " + str(res.get("改进建议", ""))).strip()
         for k, v in res.items():
             val = v if not isinstance(v, (dict, list)) else json.dumps(v, ensure_ascii=False)

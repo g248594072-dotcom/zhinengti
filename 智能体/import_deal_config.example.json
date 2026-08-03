@@ -12,6 +12,8 @@
   "salesmartly": {
     "_说明": "SaleSmartly API Token / 项目 ID 放在同目录 api-key.json（见 api-key.json.example）",
     "deal_tag_keywords": ["全款", "定金", "分期"],
+    "delete_tag_keywords": ["删", "删除", "拉黑", "拒收"],
+    "blacklist_tag_keywords": ["黑粉"],
     "date_label_category": "澳大利亚",
     "date_label_name": "日期"
   }

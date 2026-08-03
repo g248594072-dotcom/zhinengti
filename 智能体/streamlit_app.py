@@ -556,13 +556,15 @@ def _execute_qc_run(
     st.success(done_msg)
 
     try:
-        from db import save_qc_results, mark_deal_customers_from_qc
+        from db import save_qc_results, mark_deal_customers_from_qc, mark_deleted_customers_from_qc
 
         save_result = save_qc_results(results)
         deal_result = mark_deal_customers_from_qc(results)
+        delete_result = mark_deleted_customers_from_qc(results)
         st.info(
             f"质检结果已入库：{save_result['saved']} 条；"
-            f"新增/更新成交客户：{deal_result['deal_customers']} 个"
+            f"新增/更新成交客户：{deal_result['deal_customers']} 个；"
+            f"标记删除客户：{delete_result['deleted_customers']} 个"
         )
         if save_result.get("skipped"):
             st.warning(
@@ -709,13 +711,15 @@ def main():
     if not _check_app_password(cfg):
         st.stop()
 
-    qc_tab, deal_tab, kb_tab, compare_tab = st.tabs(
-        ["聊天质检", "上传成交客户", "知识库管理", "聊天进度对比"]
+    qc_tab, deal_tab, delete_tab, kb_tab, compare_tab = st.tabs(
+        ["聊天质检", "上传成交客户", "上传删除客户", "知识库管理", "聊天进度对比"]
     )
     with qc_tab:
         _render_qc_tab(cfg)
     with deal_tab:
         _render_deal_import_tab(cfg)
+    with delete_tab:
+        _render_delete_import_tab(cfg)
     with kb_tab:
         _render_knowledge_base_tab(cfg)
     with compare_tab:
@@ -911,7 +915,7 @@ def _render_qc_tab(cfg):
         key="enable_deep_review",
     )
     st.toggle(
-        "注入成交经验参考（从数据库检索相似已成交案例，辅助质检判断）",
+        "注入成交/删除经验参考（检索相似已成交与已删除案例，辅助质检判断）",
         value=bool(cfg.get("deal_context_enabled", True)),
         key="enable_deal_context",
     )
@@ -1021,6 +1025,30 @@ def _render_qc_tab(cfg):
             st.error(f"数据库不可用：{e}")
         except Exception as e:
             st.error(f"成交学习失败：{core.redact_secrets(str(e), cfg)}")
+
+    # ---------- 删除客户流失复盘 ----------
+    st.subheader("删除客户学习")
+    st.caption("对已删除且尚未分析的客户做流失复盘：自动注入相似删除案例与同顾虑成交对比，提炼规避规则。")
+    if st.button("分析新增删除客户", type="secondary", key="analyze_deletes_btn"):
+        try:
+            result = _run_delete_learning_with_progress(cfg, 20)
+            st.success(
+                f"删除学习完成：待分析 {result['total']} 个，"
+                f"成功 {result['success']} 个（跳过 {result.get('skipped', 0)}，"
+                f"增量 {result.get('incremental', 0)}，全量 {result.get('full', 0)}），"
+                f"失败 {result['failed']} 个"
+            )
+            churn_stats = result.get("churn_stats") or {}
+            if churn_stats:
+                st.caption("流失模式：" + " / ".join(f"{k} {v}" for k, v in churn_stats.items()))
+            if result["failed"] > 0 and result.get("errors"):
+                with st.expander("失败详情"):
+                    for err in result["errors"]:
+                        st.text(err)
+        except RuntimeError as e:
+            st.error(f"数据库不可用：{e}")
+        except Exception as e:
+            st.error(f"删除学习失败：{core.redact_secrets(str(e), cfg)}")
 
     # ---------- 统计与下载 ----------
     if st.session_state.last_stats:
@@ -1355,6 +1383,7 @@ def _render_knowledge_base_tab(cfg) -> None:
         refine_stats,
     )
     from weekly_prompt_merge import (
+        DELETE_SUPPLEMENT_FILE,
         SUPPLEMENT_FILE,
         apply_rules_to_supplement,
         build_supplement_markdown,
@@ -1363,17 +1392,26 @@ def _render_knowledge_base_tab(cfg) -> None:
         read_current_supplement,
     )
 
+    rule_type = st.radio(
+        "知识库类型",
+        ["成交复盘规则", "删除复盘规则"],
+        horizontal=True,
+        key="kb_rule_type",
+    )
+    kb_type = "delete" if rule_type.startswith("删除") else "deal"
+    supplement_path = DELETE_SUPPLEMENT_FILE if kb_type == "delete" else SUPPLEMENT_FILE
+    table_name = "delete_analysis" if kb_type == "delete" else "deal_analysis"
+
     st.caption(
-        "将成交心理学习沉淀的「智能体判断规则」审核后写入全局知识库；"
-        "质检 full/lite 模式会自动加载该文件。"
+        f"将{rule_type}审核后写入全局知识库；质检 full/lite 模式会自动加载对应 supplement 文件。"
     )
 
     st.subheader("1. 当前全局知识库")
-    current = read_current_supplement()
+    current = read_current_supplement(kb_type)
     if current.strip():
         parsed_current = extract_rules_from_text(current)
-        st.caption(f"路径：`{SUPPLEMENT_FILE}` · 共 **{len(parsed_current)}** 条规则")
-        with st.expander("查看 deal_learned_supplement.md", expanded=False):
+        st.caption(f"路径：`{supplement_path}` · 共 **{len(parsed_current)}** 条规则")
+        with st.expander(f"查看 {os.path.basename(supplement_path)}", expanded=False):
             st.markdown(current[:16000])
             if len(current) > 16000:
                 st.caption("（内容过长，仅展示前 16000 字）")
@@ -1388,7 +1426,7 @@ def _render_knowledge_base_tab(cfg) -> None:
 
     st.subheader("2. 从数据库导出待审核规则")
     st.markdown(
-        "从 MySQL `deal_analysis` 读取最近 N 天内**不重复**的「智能体判断规则」，"
+        f"从 MySQL `{table_name}` 读取最近 N 天内**不重复**的「智能体判断规则」，"
         "生成待审核 Markdown。"
     )
     c1, c2 = st.columns([1, 2])
@@ -1399,7 +1437,7 @@ def _render_knowledge_base_tab(cfg) -> None:
 
     if st.button("从数据库导出到编辑器", type="secondary", key="kb_export_btn"):
         try:
-            rules, md = export_rules_markdown(int(days))
+            rules, md = export_rules_markdown(int(days), rule_type=kb_type)
             st.session_state.kb_review_md = md
             st.session_state.kb_parsed_preview = None
             st.session_state.kb_supplement_preview = None
@@ -1429,7 +1467,7 @@ def _render_knowledge_base_tab(cfg) -> None:
         st.download_button(
             label="下载当前编辑内容为 .md",
             data=(st.session_state.get("kb_review_md") or "").encode("utf-8"),
-            file_name=f"待审核成交规则-{datetime.now().strftime('%Y%m%d%H%M%S')}.md",
+            file_name=f"待审核{'删除' if kb_type == 'delete' else '成交'}规则-{datetime.now().strftime('%Y%m%d%H%M%S')}.md",
             mime="text/markdown",
             key="kb_download_md",
         )
@@ -1545,7 +1583,7 @@ def _render_knowledge_base_tab(cfg) -> None:
         key="kb_merge_existing",
     )
     if not merge_existing:
-        st.caption("未勾选时将**覆盖**写入 `deal_learned_supplement.md`。")
+        st.caption(f"未勾选时将**覆盖**写入 `{os.path.basename(supplement_path)}`。")
 
     c5, c6 = st.columns(2)
     with c5:
@@ -1556,14 +1594,16 @@ def _render_knowledge_base_tab(cfg) -> None:
             else:
                 preview_rules = list(rules)
                 if merge_existing:
-                    existing = extract_rules_from_text(read_current_supplement())
+                    existing = extract_rules_from_text(read_current_supplement(kb_type))
                     seen = set(existing)
                     preview_rules = list(existing)
                     for r in rules:
                         if r not in seen:
                             preview_rules.append(r)
                             seen.add(r)
-                st.session_state.kb_supplement_preview = build_supplement_markdown(preview_rules)
+                st.session_state.kb_supplement_preview = build_supplement_markdown(
+                    preview_rules, rule_type=kb_type
+                )
 
     preview_md = st.session_state.get("kb_supplement_preview")
     if preview_md:
@@ -1577,7 +1617,9 @@ def _render_knowledge_base_tab(cfg) -> None:
                 st.error("没有可写入的规则。请先导出、提纯选用，或保留编辑区至少一条规则。")
             else:
                 try:
-                    result = apply_rules_to_supplement(rules, merge_existing=merge_existing)
+                    result = apply_rules_to_supplement(
+                        rules, merge_existing=merge_existing, rule_type=kb_type
+                    )
                 except Exception as e:
                     st.error(f"写入失败：{core.redact_secrets(str(e), cfg)}")
                 else:
@@ -1589,6 +1631,257 @@ def _render_knowledge_base_tab(cfg) -> None:
                         st.caption("质检时 full/lite 模式将自动加载该文件，无需重启。")
                     else:
                         st.error(result.get("error") or "写入失败")
+
+
+def _render_delete_learning_settlement(learn: dict) -> None:
+    st.subheader("学习结算")
+    st.caption("两阶段：先比对已有删除案例 → 跳过 / 增量 / 全量复盘（含成交对比注入）。")
+    _show_stat_row([
+        ("待分析客户", learn.get("total", 0)),
+        ("成功", learn.get("success", 0)),
+        ("继承跳过", learn.get("skipped", 0)),
+        ("增量学习", learn.get("incremental", 0)),
+        ("全量复盘", learn.get("full", 0)),
+        ("失败", learn.get("failed", 0)),
+    ])
+    churn_stats = learn.get("churn_stats") or {}
+    if churn_stats:
+        st.caption("流失模式：" + " / ".join(f"{k} {v}" for k, v in churn_stats.items()))
+    if learn.get("errors"):
+        with st.expander(f"失败原因（{len(learn['errors'])} 条）", expanded=True):
+            for err in learn["errors"][:30]:
+                st.text(err)
+    if learn.get("learned_items"):
+        with st.expander("智能体判断规则（摘要）", expanded=False):
+            for item in learn["learned_items"][:15]:
+                mode = item.get("learn_mode") or ""
+                title = f"**{item.get('contact_name')}**"
+                if mode:
+                    title += f" · {mode}"
+                if item.get("churn_pattern"):
+                    title += f" · {item['churn_pattern']}"
+                st.markdown(title)
+                st.text((item.get("recommended_agent_rules") or "")[:300])
+
+
+def _run_delete_learning_with_progress(cfg, limit: int):
+    from delete_import_core import run_delete_learning
+
+    progress = st.progress(0, text="删除客户流失复盘准备中…")
+    status = st.empty()
+    logs: list[str] = []
+
+    def on_progress(done, total, name, ok, mode=""):
+        pct = done / total if total else 1.0
+        tag = "✓" if ok else "✗"
+        mode_label = {
+            "skipped": "跳过",
+            "incremental": "增量",
+            "full": "全量",
+            "failed": "失败",
+        }.get(mode, "")
+        suffix = f" [{mode_label}]" if mode_label else ""
+        line = f"[{done}/{total}] {tag} 客户 {name}{suffix}"
+        logs.append(line)
+        progress.progress(pct, text=f"删除复盘（按客户）{done}/{total}")
+        tail = logs[-6:]
+        status.markdown("**最近进度**\n\n" + "\n\n".join(f"- {l}" for l in tail))
+
+    result = run_delete_learning(int(limit), qc_cfg=cfg, on_progress=on_progress)
+    progress.progress(1.0, text="删除复盘完成")
+    return result
+
+
+def _render_delete_learn_prompt(cfg, default_limit: int) -> None:
+    from db import count_unanalyzed_delete_customers
+
+    pending = count_unanalyzed_delete_customers()
+    st.subheader("5. 是否开始流失复盘？")
+    st.markdown(
+        "分析单位是 **每位删除客户**（使用该客户**全部聊天记录**做一次复盘），"
+        "已学习过的客户不会重复分析。"
+    )
+    if pending <= 0:
+        st.success("当前所有删除客户均已完成流失复盘，无需再分析。")
+        return
+    st.info(f"当前有 **{pending}** 位删除客户尚未学习。")
+    suggest = min(pending, default_limit)
+    analyze_limit = st.number_input(
+        "本次最多分析客户数",
+        min_value=1,
+        max_value=max(1, pending),
+        value=suggest,
+        key="delete_import_analyze_limit",
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        start = st.button("开始流失复盘", type="primary", key="delete_import_learn_start")
+    with c2:
+        skip = st.button("暂不分析", key="delete_import_learn_skip")
+    if skip:
+        st.session_state.delete_learn_skipped = True
+        st.caption("已跳过；可稍后在「聊天质检」页点击「分析新增删除客户」，或等凌晨自动任务。")
+    if start:
+        try:
+            learn = _run_delete_learning_with_progress(cfg, int(analyze_limit))
+        except RuntimeError as e:
+            st.error(f"数据库不可用：{e}")
+            return
+        except Exception as e:
+            st.error(f"流失复盘失败：{core.redact_secrets(str(e), cfg)}")
+            return
+        st.session_state.delete_last_learn_result = learn
+        st.session_state.delete_learn_skipped = False
+        st.success("流失复盘完成，请查看下方结算。")
+        _render_delete_learning_settlement(learn)
+    elif st.session_state.get("delete_last_learn_result"):
+        _render_delete_learning_settlement(st.session_state.delete_last_learn_result)
+
+
+def _render_delete_import_settlement(summary: dict, target: str = "") -> None:
+    settlement = summary.get("settlement") or {}
+    st.subheader("导入结算")
+    if target:
+        st.caption(f"目标数据库：{target}")
+    _show_stat_row([
+        ("上传文件", summary.get("file_count", 0)),
+        ("解析会话", settlement.get("total_sessions", summary.get("session_count", 0))),
+        ("成功入库", settlement.get("success_count", 0)),
+        ("跳过", settlement.get("skipped_count", 0)),
+        ("失败", settlement.get("failed_count", 0)),
+        ("标记已删除", summary.get("marked_deleted", 0)),
+    ])
+    if summary.get("errors"):
+        with st.expander("其他警告"):
+            for err in summary["errors"][:30]:
+                st.text(err)
+
+
+def _render_delete_import_tab(cfg):
+    from deal_import_core import get_mysql_target_label, load_import_config
+    from delete_import_core import execute_delete_import
+
+    import_cfg = load_import_config()
+    target = get_mysql_target_label(import_cfg)
+    default_limit = int(import_cfg.get("default_analyze_limit") or 20)
+    sm_cfg = import_cfg.get("salesmartly") or {}
+    delete_keywords = sm_cfg.get("delete_tag_keywords") or ["删", "删除", "拉黑", "拒收"]
+
+    st.caption(
+        "将**已删除**客户聊天写入 MySQL 并**直接标记为已删除**（排除黑粉，不跑质检）。"
+        "支持每日自动从 SaleSmartly 拉取，也可手动上传 Excel。"
+    )
+    st.info(f"导入目标数据库：**{target}**")
+
+    source = st.radio(
+        "数据来源",
+        ["SaleSmartly API（昨日删除）", "上传 Excel"],
+        horizontal=True,
+        key="delete_import_source",
+    )
+
+    if source.startswith("SaleSmartly"):
+        st.subheader("1. 从 SaleSmartly 拉取")
+        st.markdown(
+            f"规则：昨天日期标签下的客户，且访客标签含 **{' / '.join(delete_keywords)}**，"
+            f"**排除黑粉**。建议 **02:15** 运行 `fetch_delete_daily.py`，"
+            f"**03:30** 由 `daily_delete_job.py` 自动流失复盘。"
+        )
+        col_a, col_b = st.columns(2)
+        with col_a:
+            preview_api = st.button("预览昨日删除（不写库）", key="delete_api_preview")
+        with col_b:
+            import_api = st.button("拉取昨日删除并导入", type="primary", key="delete_api_import")
+
+        if preview_api or import_api:
+            from fetch_cancel import FetchCancelledError
+            from fetch_delete_daily import run_fetch_delete_daily
+
+            on_fetch_progress, fetch_bar, cancel_check = _begin_salesmartly_fetch()
+            api_result = None
+            try:
+                api_result = run_fetch_delete_daily(
+                    dry_run=preview_api,
+                    on_progress=on_fetch_progress,
+                    cancel_check=cancel_check,
+                )
+                fetch_bar.progress(1.0, text="拉取完成")
+            except FetchCancelledError:
+                st.warning("拉取已取消。")
+            except Exception as e:
+                st.error(f"拉取失败：{core.redact_secrets(str(e), cfg)}")
+                api_result = None
+
+            if api_result is not None:
+                meta = api_result.get("meta") or {}
+                st.caption(
+                    f"业务日 **{api_result.get('target_day')}** · 删除 **{meta.get('delete_contacts', 0)}** 人 · "
+                    f"有效会话 **{meta.get('sessions_with_messages', 0)}**"
+                )
+                if api_result.get("error") and not api_result.get("ok"):
+                    st.error(api_result["error"])
+                elif preview_api:
+                    st.success("预览完成（未写入数据库）。")
+                elif api_result.get("ok"):
+                    summary = api_result.get("summary") or {}
+                    st.session_state.delete_last_import_summary = summary
+                    st.session_state.delete_last_import_target = api_result.get("target") or target
+                    st.session_state.delete_learn_skipped = False
+                    st.session_state.delete_last_learn_result = None
+                    st.success("导入完成，请查看下方结算。")
+    else:
+        uploaded = st.file_uploader(
+            "选择已删除客户聊天记录（可多选 .xlsx）",
+            type=["xlsx"],
+            accept_multiple_files=True,
+            key="delete_import_upload",
+        )
+        if uploaded:
+            try:
+                file_dfs, read_errors = _read_uploaded_files(uploaded)
+            except ValueError as e:
+                st.error(str(e))
+                file_dfs = None
+            if file_dfs:
+                for err in read_errors:
+                    st.warning(err)
+                if st.button("开始导入", type="primary", key="delete_import_start"):
+                    with st.spinner("正在导入…"):
+                        try:
+                            result = execute_delete_import(
+                                file_dfs=file_dfs,
+                                run_analyze=False,
+                                qc_cfg=cfg,
+                            )
+                        except RuntimeError as e:
+                            st.error(f"数据库连接失败：{e}")
+                            return
+                        except Exception as e:
+                            st.error(f"导入失败：{core.redact_secrets(str(e), cfg)}")
+                            return
+                    if not result.get("ok"):
+                        st.error(result.get("error") or "导入失败")
+                        return
+                    st.session_state.delete_last_import_summary = result.get("summary") or {}
+                    st.session_state.delete_last_import_target = result.get("target") or target
+                    st.session_state.delete_learn_skipped = False
+                    st.session_state.delete_last_learn_result = None
+                    st.success("导入完成，请查看下方结算。")
+
+    if st.session_state.get("delete_last_import_summary"):
+        st.divider()
+        _render_delete_import_settlement(
+            st.session_state.delete_last_import_summary,
+            st.session_state.get("delete_last_import_target") or target,
+        )
+        if st.session_state.get("delete_learn_skipped"):
+            if st.button("现在开始做流失复盘", key="delete_learn_unskip"):
+                st.session_state.delete_learn_skipped = False
+                st.rerun()
+        elif not st.session_state.get("delete_last_learn_result"):
+            _render_delete_learn_prompt(cfg, default_limit)
+        else:
+            _render_delete_learning_settlement(st.session_state.delete_last_learn_result)
 
 
 def _render_deal_import_tab(cfg):

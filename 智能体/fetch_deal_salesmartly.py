@@ -584,3 +584,179 @@ def fetch_yesterday_deal_dataframe(
     }
     _log(f"完成：{len(rows)} 通有效会话")
     return df, meta
+
+
+DEFAULT_DELETE_KEYWORDS = ("删", "删除", "拉黑", "拒收")
+DEFAULT_BLACKLIST_KEYWORDS = ("黑粉",)
+
+
+def build_delete_pattern(keywords: List[str] | None = None) -> re.Pattern:
+    words = [w.strip() for w in (keywords or DEFAULT_DELETE_KEYWORDS) if w and str(w).strip()]
+    if not words:
+        words = list(DEFAULT_DELETE_KEYWORDS)
+    return re.compile("|".join(re.escape(w) for w in words))
+
+
+def build_blacklist_pattern(keywords: List[str] | None = None) -> re.Pattern:
+    words = [w.strip() for w in (keywords or DEFAULT_BLACKLIST_KEYWORDS) if w and str(w).strip()]
+    if not words:
+        words = list(DEFAULT_BLACKLIST_KEYWORDS)
+    return re.compile("|".join(re.escape(w) for w in words))
+
+
+def is_delete_contact(
+    contact: dict,
+    delete_pattern: re.Pattern | None = None,
+    blacklist_pattern: re.Pattern | None = None,
+) -> bool:
+    labels = _format_labels(contact.get("labels"))
+    if (blacklist_pattern or build_blacklist_pattern()).search(labels):
+        return False
+    return bool((delete_pattern or build_delete_pattern()).search(labels))
+
+
+def fetch_yesterday_delete_dataframe(
+    client: SaleSmartlyClient,
+    *,
+    target_day: datetime | None = None,
+    delete_keywords: List[str] | None = None,
+    blacklist_keywords: List[str] | None = None,
+    date_label_category: str = "澳大利亚",
+    date_label_name: str = "日期",
+    on_progress: Optional[Callable[[str], None]] = None,
+    cancel_check: Optional[CancelCheck] = None,
+) -> tuple[pd.DataFrame, dict]:
+    """拉取指定业务日带删除标签的客户聊天记录（排除黑粉）。"""
+    day = target_day or yesterday_for_run()
+    tag_name = date_tag_name(day)
+    delete_pattern = build_delete_pattern(delete_keywords)
+    blacklist_pattern = build_blacklist_pattern(blacklist_keywords)
+    config = client.config
+
+    def _log(msg: str) -> None:
+        logger.info(msg)
+        if on_progress:
+            on_progress(msg)
+
+    _log(f"查找日期标签：{tag_name}")
+    tag_map = build_tag_value_id_map(client, date_label_category, date_label_name)
+    tag_value_id = tag_map.get(tag_name)
+    if not tag_value_id:
+        raise ValueError(
+            f"未找到日期标签「{tag_name}」。"
+            f"可用标签：{', '.join(sorted(tag_map.keys())[-15:]) or '（无）'}"
+        )
+
+    _log(f"拉取标签客户（ID={tag_value_id}）…")
+    contacts_map = _fetch_contacts_by_tag_value(config, tag_value_id)
+    id_to_name = {vid: name for name, vid in tag_map.items()}
+
+    delete_contacts: Dict[str, dict] = {}
+    for uid, contact in contacts_map.items():
+        labels_str = _format_labels(contact.get("labels"), id_to_name)
+        contact = dict(contact)
+        contact["_labels_str"] = labels_str
+        if is_delete_contact(contact, delete_pattern, blacklist_pattern):
+            delete_contacts[uid] = contact
+
+    _log(f"日期标签下 {len(contacts_map)} 人，删除客户 {len(delete_contacts)} 人（已排除黑粉）")
+    if not delete_contacts:
+        empty = pd.DataFrame(columns=[
+            "联系人", "会话ID", "接待成员", "社媒渠道", "会话消息内容",
+        ])
+        return empty, {
+            "date_tag": tag_name,
+            "target_day": day.strftime("%Y-%m-%d"),
+            "contacts_total": len(contacts_map),
+            "delete_contacts": 0,
+            "sessions": 0,
+        }
+
+    session_ids: List[str] = []
+    seen_sids: Set[str] = set()
+    for contact in delete_contacts.values():
+        sid = str(contact.get("session_id") or "").strip()
+        if sid and sid not in seen_sids:
+            seen_sids.add(sid)
+            session_ids.append(sid)
+
+    _log(f"拉取 {len(session_ids)} 个会话…")
+
+    def _session_progress(done: int, total: int) -> None:
+        if on_progress:
+            on_progress(f"会话详情 {done}/{total}")
+
+    sessions = _fetch_sessions_by_ids(
+        config, session_ids, on_progress=_session_progress, cancel_check=cancel_check
+    )
+    session_by_id = {str(s.get("session_id") or ""): s for s in sessions if s.get("session_id")}
+
+    _log("拉取完整聊天记录…")
+
+    def _msg_progress(done: int, total: int, msg_count: int) -> None:
+        if on_progress:
+            on_progress(f"聊天记录 {done}/{total}，共 {msg_count} 条")
+
+    messages_by_session = _fetch_messages_for_sessions(
+        config,
+        list(session_by_id.keys()),
+        on_progress=_msg_progress,
+        cancel_check=cancel_check,
+    )
+
+    members = fetch_members(client)
+    member_id_to_name = build_member_maps(members)
+
+    rows = []
+    for uid, contact in delete_contacts.items():
+        session_id = str(contact.get("session_id") or "").strip()
+        session = session_by_id.get(session_id, {})
+        contact_name = (
+            str(contact.get("name") or "").strip()
+            or str(session.get("title") or "").strip()
+            or uid
+        )
+        labels_str = contact.get("_labels_str") or _format_labels(contact.get("labels"), id_to_name)
+
+        msgs = messages_by_session.get(session_id, [])
+        message_text = "\n".join(
+            _format_message_line(m, member_id_to_name)
+            for m in msgs
+            if _should_include_in_transcript(m)
+        )
+        if not message_text.strip():
+            continue
+
+        sys_user_id = session.get("sys_user_id")
+        try:
+            agent_name = member_id_to_name.get(int(sys_user_id), "")
+        except (TypeError, ValueError):
+            agent_name = ""
+        if not agent_name and sys_user_id not in (None, 0, "0"):
+            agent_name = str(sys_user_id)
+
+        channel_name = CHANNEL_MAP.get(session.get("channel"), str(session.get("channel") or ""))
+
+        rows.append({
+            "联系人": contact_name,
+            "会话ID": session_id,
+            "访客标签": labels_str,
+            "接待成员": agent_name,
+            "社媒渠道": channel_name,
+            "会话消息内容": message_text,
+        })
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        df.columns = df.columns.str.strip()
+
+    meta = {
+        "date_tag": tag_name,
+        "target_day": day.strftime("%Y-%m-%d"),
+        "contacts_total": len(contacts_map),
+        "delete_contacts": len(delete_contacts),
+        "sessions_with_messages": len(rows),
+        "sessions": len(session_ids),
+    }
+    _log(f"完成：{len(rows)} 通有效会话")
+    return df, meta

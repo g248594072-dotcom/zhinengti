@@ -59,6 +59,7 @@ _CREATE_TABLES_SQL = [
         first_message_at DATETIME,
         last_message_at DATETIME,
         deal_at DATETIME,
+        deleted_at DATETIME,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         UNIQUE KEY uk_external_customer_key (external_customer_key),
@@ -189,6 +190,48 @@ _CREATE_TABLES_SQL = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """
+    CREATE TABLE IF NOT EXISTS delete_analysis (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        customer_id BIGINT NOT NULL,
+        session_id BIGINT,
+        delete_stage_summary TEXT,
+        customer_profile TEXT,
+        initial_need TEXT,
+        unmet_need TEXT,
+        trust_breakdown_point TEXT,
+        delete_trigger TEXT,
+        sales_mistakes TEXT,
+        warning_signals TEXT,
+        recoverable TEXT,
+        customer_psychology_path TEXT,
+        churn_pattern TEXT,
+        avoidable_experience TEXT,
+        recommended_agent_rules TEXT,
+        raw_result JSON,
+        analyzed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_customer_latest_delete_analysis (customer_id),
+        KEY idx_session_id (session_id),
+        KEY idx_analyzed_at (analyzed_at),
+        KEY idx_churn_pattern (churn_pattern(64)),
+        CONSTRAINT fk_delete_analysis_customer
+            FOREIGN KEY (customer_id) REFERENCES customers(id),
+        CONSTRAINT fk_delete_analysis_session
+            FOREIGN KEY (session_id) REFERENCES chat_sessions(id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS daily_delete_learning_runs (
+        id BIGINT PRIMARY KEY AUTO_INCREMENT,
+        run_date DATE NOT NULL,
+        new_delete_customers INT DEFAULT 0,
+        analyzed_customers INT DEFAULT 0,
+        failed_customers INT DEFAULT 0,
+        summary TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_delete_run_date (run_date)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
     CREATE TABLE IF NOT EXISTS import_conflicts (
         id BIGINT PRIMARY KEY AUTO_INCREMENT,
         original_session_id VARCHAR(255) NOT NULL,
@@ -316,9 +359,27 @@ def init_db() -> None:
         with engine.begin() as conn:
             for ddl in _CREATE_TABLES_SQL:
                 conn.execute(text(ddl))
+            _run_schema_migrations(conn)
 
     with_db_retry(_run)
     _DB_READY = True
+
+
+def _run_schema_migrations(conn) -> None:
+    """轻量迁移：为已有库补充新列。"""
+    try:
+        row = conn.execute(
+            text("""
+                SELECT COUNT(*) FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = DATABASE()
+                  AND TABLE_NAME = 'customers'
+                  AND COLUMN_NAME = 'deleted_at'
+            """),
+        ).scalar()
+        if not row:
+            conn.execute(text("ALTER TABLE customers ADD COLUMN deleted_at DATETIME NULL"))
+    except Exception:
+        logger.exception("schema migration customers.deleted_at failed")
 
 
 # ---------------------------------------------------------------------------
@@ -1264,6 +1325,283 @@ def save_daily_learning_run(
                 {
                     "dt": run_date,
                     "new_deal": new_deal_customers,
+                    "analyzed": analyzed_customers,
+                    "failed": failed_customers,
+                    "summary": summary,
+                },
+            )
+
+    with_db_retry(_run)
+
+
+# ---------------------------------------------------------------------------
+# 删除客户标记与心理分析
+# ---------------------------------------------------------------------------
+
+def mark_sessions_as_deleted(sessions: list[dict]) -> int:
+    """将会话对应客户标记为已删除（不覆盖已成交）。"""
+    init_db()
+    engine = get_engine()
+    marked = 0
+    with engine.begin() as conn:
+        for session in sessions:
+            try:
+                sid = normalize_session_id(session)
+            except ValueError:
+                continue
+            result = conn.execute(
+                text("""
+                    UPDATE customers c
+                    JOIN chat_sessions s ON s.customer_id = c.id
+                    SET c.status = '已删除',
+                        c.deleted_at = COALESCE(c.deleted_at, NOW()),
+                        c.updated_at = NOW()
+                    WHERE s.original_session_id = :sid
+                      AND c.status != '已成交'
+                """),
+                {"sid": sid},
+            )
+            marked += result.rowcount or 0
+    return marked
+
+
+def _is_delete_from_qc(result: dict) -> bool:
+    tag = str(result.get("结果标签") or result.get("result_tag") or "").strip()
+    if tag == "删":
+        return True
+    stage = str(result.get("客户阶段") or result.get("customer_stage") or "")
+    return "删" in stage or "拉黑" in stage or "拒收" in stage
+
+
+def mark_deleted_customers_from_qc(results: list[dict]) -> dict:
+    """从质检结果标记删除客户（排除黑粉）。"""
+    init_db()
+    deleted_customers = 0
+    engine = get_engine()
+
+    with engine.begin() as conn:
+        for result in results:
+            if str(result.get("结果标签") or "").strip() == "黑粉":
+                continue
+            if not _is_delete_from_qc(result):
+                continue
+            resolved = _resolve_session_by_result(result)
+            if not resolved:
+                continue
+            conn.execute(
+                text("""
+                    UPDATE customers
+                    SET status = '已删除',
+                        deleted_at = COALESCE(deleted_at, NOW()),
+                        updated_at = NOW()
+                    WHERE id = :cid
+                      AND status != '已成交'
+                """),
+                {"cid": resolved["customer_id"]},
+            )
+            deleted_customers += 1
+
+    return {"deleted_customers": deleted_customers}
+
+
+def count_unanalyzed_delete_customers() -> int:
+    init_db()
+    engine = get_engine()
+    with engine.connect() as conn:
+        row = conn.execute(
+            text("""
+                SELECT COUNT(*)
+                FROM customers c
+                LEFT JOIN delete_analysis da ON da.customer_id = c.id
+                WHERE c.status = '已删除'
+                  AND da.id IS NULL
+            """),
+        ).scalar()
+    return int(row or 0)
+
+
+def get_unanalyzed_delete_customers(limit: int = 20) -> list[dict]:
+    init_db()
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT c.id AS customer_id,
+                       (SELECT s.id FROM chat_sessions s
+                        WHERE s.customer_id = c.id
+                        ORDER BY s.updated_at DESC LIMIT 1) AS session_id,
+                       c.original_session_id,
+                       c.contact_name,
+                       c.sales_name,
+                       c.status,
+                       c.deleted_at
+                FROM customers c
+                LEFT JOIN delete_analysis da ON da.customer_id = c.id
+                WHERE c.status = '已删除'
+                  AND da.id IS NULL
+                ORDER BY c.deleted_at DESC, c.updated_at DESC
+                LIMIT :lim
+            """),
+            {"lim": limit},
+        ).fetchall()
+        return [_row_to_dict(r) for r in rows]
+
+
+_DELETE_FIELD_MAP = {
+    "删除阶段总结": "delete_stage_summary",
+    "客户画像": "customer_profile",
+    "初始需求": "initial_need",
+    "未满足的需求": "unmet_need",
+    "信任崩塌点": "trust_breakdown_point",
+    "删除触发点": "delete_trigger",
+    "销售踩雷动作": "sales_mistakes",
+    "删除前预警信号": "warning_signals",
+    "是否可挽回": "recoverable",
+    "客户心理路径": "customer_psychology_path",
+    "流失模式分类": "churn_pattern",
+    "可规避销售经验": "avoidable_experience",
+    "智能体判断规则": "recommended_agent_rules",
+}
+
+
+def save_delete_analysis(customer_id: int, session_id: int | None, analysis: dict) -> None:
+    init_db()
+    fields = {db_col: analysis.get(cn_key) or analysis.get(db_col) or ""
+              for cn_key, db_col in _DELETE_FIELD_MAP.items()}
+    raw = analysis if isinstance(analysis, dict) else {}
+
+    def _run() -> None:
+        engine = get_engine()
+        with engine.begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO delete_analysis (
+                        customer_id, session_id,
+                        delete_stage_summary, customer_profile, initial_need,
+                        unmet_need, trust_breakdown_point, delete_trigger,
+                        sales_mistakes, warning_signals, recoverable,
+                        customer_psychology_path, churn_pattern,
+                        avoidable_experience, recommended_agent_rules,
+                        raw_result
+                    ) VALUES (
+                        :cid, :sid,
+                        :delete_stage_summary, :customer_profile, :initial_need,
+                        :unmet_need, :trust_breakdown_point, :delete_trigger,
+                        :sales_mistakes, :warning_signals, :recoverable,
+                        :customer_psychology_path, :churn_pattern,
+                        :avoidable_experience, :recommended_agent_rules,
+                        :raw
+                    )
+                    ON DUPLICATE KEY UPDATE
+                        session_id = VALUES(session_id),
+                        delete_stage_summary = VALUES(delete_stage_summary),
+                        customer_profile = VALUES(customer_profile),
+                        initial_need = VALUES(initial_need),
+                        unmet_need = VALUES(unmet_need),
+                        trust_breakdown_point = VALUES(trust_breakdown_point),
+                        delete_trigger = VALUES(delete_trigger),
+                        sales_mistakes = VALUES(sales_mistakes),
+                        warning_signals = VALUES(warning_signals),
+                        recoverable = VALUES(recoverable),
+                        customer_psychology_path = VALUES(customer_psychology_path),
+                        churn_pattern = VALUES(churn_pattern),
+                        avoidable_experience = VALUES(avoidable_experience),
+                        recommended_agent_rules = VALUES(recommended_agent_rules),
+                        raw_result = VALUES(raw_result),
+                        analyzed_at = NOW()
+                """),
+                {
+                    "cid": customer_id,
+                    "sid": session_id,
+                    **fields,
+                    "raw": json.dumps(raw, ensure_ascii=False, default=str),
+                },
+            )
+
+    with_db_retry(_run)
+
+
+def list_delete_analyses(limit: int = 200, since_date: datetime | None = None) -> list[dict]:
+    init_db()
+    engine = get_engine()
+    sql = """
+        SELECT da.*,
+               c.contact_name,
+               c.original_session_id,
+               c.sales_name,
+               c.status AS customer_status
+        FROM delete_analysis da
+        JOIN customers c ON c.id = da.customer_id
+        WHERE 1=1
+    """
+    params: dict[str, Any] = {"lim": int(limit)}
+    if since_date is not None:
+        sql += " AND da.analyzed_at >= :since"
+        params["since"] = since_date
+    sql += " ORDER BY da.analyzed_at DESC LIMIT :lim"
+    with engine.connect() as conn:
+        rows = conn.execute(text(sql), params).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
+def list_delete_analyses_since_days(days: int = 7, limit: int = 500) -> list[dict]:
+    from datetime import timedelta
+
+    since = datetime.now() - timedelta(days=max(1, int(days)))
+    return list_delete_analyses(limit=limit, since_date=since)
+
+
+def list_distinct_delete_agent_rules() -> list[str]:
+    init_db()
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT DISTINCT recommended_agent_rules
+                FROM delete_analysis
+                WHERE recommended_agent_rules IS NOT NULL
+                  AND TRIM(recommended_agent_rules) != ''
+            """),
+        ).fetchall()
+    out: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        rule = str(row[0] or "").strip()
+        if rule and rule not in seen:
+            seen.add(rule)
+            out.append(rule)
+    return out
+
+
+def save_daily_delete_learning_run(
+    run_date,
+    new_delete_customers: int,
+    analyzed_customers: int,
+    failed_customers: int,
+    summary: str,
+) -> None:
+    init_db()
+
+    def _run() -> None:
+        engine = get_engine()
+        with engine.begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO daily_delete_learning_runs (
+                        run_date, new_delete_customers, analyzed_customers,
+                        failed_customers, summary
+                    ) VALUES (
+                        :dt, :new_del, :analyzed, :failed, :summary
+                    )
+                    ON DUPLICATE KEY UPDATE
+                        new_delete_customers = VALUES(new_delete_customers),
+                        analyzed_customers = VALUES(analyzed_customers),
+                        failed_customers = VALUES(failed_customers),
+                        summary = VALUES(summary)
+                """),
+                {
+                    "dt": run_date,
+                    "new_del": new_delete_customers,
                     "analyzed": analyzed_customers,
                     "failed": failed_customers,
                     "summary": summary,

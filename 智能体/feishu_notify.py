@@ -200,3 +200,104 @@ def notify_fetch_deal_daily_result(
         result, failed=failed, log_path=log_path, log_tail_lines=log_tail_lines
     )
     return send_feishu_text(msg)
+
+
+def build_daily_delete_job_report(result: dict) -> str:
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    total = int(result.get("total") or 0)
+    success = int(result.get("success") or 0)
+    failed = int(result.get("failed") or 0)
+    kb_pending = result.get("kb_pending")
+
+    lines = [
+        "【删除客户每日流失复盘报告】",
+        f"时间：{now}",
+        f"业务日：{_format_business_day_label(result)} 删除客户",
+        f"待分析：{total}",
+        f"成功：{success}",
+        f"失败：{failed}",
+    ]
+
+    churn_stats = result.get("churn_stats") or {}
+    if churn_stats:
+        lines.append(
+            "流失模式：" + " / ".join(f"{k} {v}" for k, v in churn_stats.items())
+        )
+
+    if kb_pending is not None:
+        try:
+            pending = int(kb_pending)
+        except (TypeError, ValueError):
+            pending = 0
+        lines.append(f"未写入知识库：{pending} 条（待审核合并至 delete_learned_supplement.md）")
+
+    if failed > 0 and result.get("errors"):
+        lines.append("")
+        lines.append("失败详情：")
+        for err in (result.get("errors") or [])[:5]:
+            lines.append(f"· {err}")
+
+    return "\n".join(lines)
+
+
+def notify_daily_delete_job_result(result: dict) -> bool:
+    return send_feishu_text(build_daily_delete_job_report(result))
+
+
+def build_fetch_delete_daily_report(
+    result: dict,
+    *,
+    failed: bool = False,
+    log_path: str | None = None,
+    log_tail_lines: int = _DEFAULT_LOG_TAIL_LINES,
+) -> str:
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    meta = result.get("meta") or {}
+    summary = result.get("summary") or {}
+    settlement = summary.get("settlement") or {}
+
+    lines = [
+        "【删除客户每日拉取报告】",
+        f"时间：{now}",
+        f"状态：{'失败' if failed else '成功'}",
+        f"业务日：{result.get('target_day', '')}",
+        f"数据库：{result.get('target', '')}",
+        f"日期标签：{meta.get('date_tag', '')}",
+        f"标签下客户：{meta.get('contacts_total', 0)}",
+        f"删除客户：{meta.get('delete_contacts', 0)}",
+        f"有效会话：{meta.get('sessions_with_messages', meta.get('sessions', 0))}",
+    ]
+
+    if not failed and not result.get("dry_run"):
+        lines.extend([
+            f"成功入库：{settlement.get('success_count', summary.get('session_count', 0))}",
+            f"标记已删除：{summary.get('marked_deleted', 0)}",
+            f"新增消息：{summary.get('messages_inserted', 0)}",
+        ])
+
+    err = (result.get("error") or "").strip()
+    if err:
+        lines.append("")
+        lines.append(f"错误：{err}")
+
+    if log_path:
+        tail = _read_log_tail(log_path, log_tail_lines)
+        if tail:
+            lines.append("")
+            lines.append(f"--- 最近日志（{log_tail_lines} 行）---")
+            lines.append(tail)
+
+    return "\n".join(lines)
+
+
+def notify_fetch_delete_daily_result(
+    result: dict,
+    *,
+    failed: bool = False,
+    log_path: str | None = None,
+    log_tail_lines: int = _DEFAULT_LOG_TAIL_LINES,
+) -> bool:
+    msg = build_fetch_delete_daily_report(
+        result, failed=failed, log_path=log_path, log_tail_lines=log_tail_lines
+    )
+    return send_feishu_text(msg)
