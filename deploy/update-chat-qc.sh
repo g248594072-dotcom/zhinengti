@@ -37,6 +37,12 @@ if ! grep -q 'def mark_sessions_as_deleted' "$BUILD_DIR/db.py"; then
   exit 1
 fi
 
+if ! grep -q 'DELETE_SUPPLEMENT_FILE' "$BUILD_DIR/weekly_prompt_merge.py"; then
+  echo "ERROR: weekly_prompt_merge.py is outdated (missing DELETE_SUPPLEMENT_FILE)." >&2
+  echo "       Run: cd $GIT_DIR && git pull origin main" >&2
+  exit 1
+fi
+
 mkdir -p "$BUILD_DIR/config"
 for f in qc_config.json .env api-key.json import_deal_config.json; do
   if [ -f "$GIT_DIR/智能体/$f" ]; then

@@ -1382,6 +1382,69 @@ def _kb_get_write_rules(extract_fn) -> tuple[list[str], str]:
     return raw, f"编辑区原始（{len(raw)} 条）"
 
 
+def _kb_prompts_dir() -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
+
+
+def _kb_supplement_path(kb_type: str) -> str:
+    name = (
+        "delete_learned_supplement.md"
+        if kb_type == "delete"
+        else "deal_learned_supplement.md"
+    )
+    return os.path.join(_kb_prompts_dir(), name)
+
+
+def _kb_read_supplement_file(kb_type: str) -> str:
+    path = _kb_supplement_path(kb_type)
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    return ""
+
+
+def _kb_export_rules_markdown(days: int, kb_type: str):
+    from weekly_prompt_merge import export_rules_markdown
+
+    try:
+        return export_rules_markdown(days, rule_type=kb_type)
+    except TypeError:
+        if kb_type == "delete":
+            raise RuntimeError(
+                "当前 weekly_prompt_merge.py 过旧，不支持删除规则导出，请 git pull 后重启服务"
+            ) from None
+        return export_rules_markdown(days)
+
+
+def _kb_build_supplement_markdown(rules: list[str], kb_type: str) -> str:
+    from weekly_prompt_merge import build_supplement_markdown
+
+    try:
+        return build_supplement_markdown(rules, rule_type=kb_type)
+    except TypeError:
+        return build_supplement_markdown(rules)
+
+
+def _kb_apply_rules_to_supplement(
+    rules: list[str],
+    *,
+    merge_existing: bool,
+    kb_type: str,
+) -> dict:
+    from weekly_prompt_merge import apply_rules_to_supplement
+
+    try:
+        return apply_rules_to_supplement(
+            rules, merge_existing=merge_existing, rule_type=kb_type
+        )
+    except TypeError:
+        if kb_type == "delete":
+            raise RuntimeError(
+                "当前 weekly_prompt_merge.py 过旧，不支持写入删除规则库，请 git pull 后重启服务"
+            ) from None
+        return apply_rules_to_supplement(rules, merge_existing=merge_existing)
+
+
 def _render_knowledge_base_tab(cfg) -> None:
     """全局知识库：从 DB 导出规则 → 在线审核 → AI 提纯 → 写入 supplement。"""
     from rule_refine import (
@@ -1389,15 +1452,7 @@ def _render_knowledge_base_tab(cfg) -> None:
         refine_rules,
         refine_stats,
     )
-    from weekly_prompt_merge import (
-        DELETE_SUPPLEMENT_FILE,
-        SUPPLEMENT_FILE,
-        apply_rules_to_supplement,
-        build_supplement_markdown,
-        export_rules_markdown,
-        extract_rules_from_text,
-        read_current_supplement,
-    )
+    from weekly_prompt_merge import extract_rules_from_text
 
     rule_type = st.radio(
         "知识库类型",
@@ -1406,7 +1461,7 @@ def _render_knowledge_base_tab(cfg) -> None:
         key="kb_rule_type",
     )
     kb_type = "delete" if rule_type.startswith("删除") else "deal"
-    supplement_path = DELETE_SUPPLEMENT_FILE if kb_type == "delete" else SUPPLEMENT_FILE
+    supplement_path = _kb_supplement_path(kb_type)
     table_name = "delete_analysis" if kb_type == "delete" else "deal_analysis"
 
     st.caption(
@@ -1414,7 +1469,7 @@ def _render_knowledge_base_tab(cfg) -> None:
     )
 
     st.subheader("1. 当前全局知识库")
-    current = read_current_supplement(kb_type)
+    current = _kb_read_supplement_file(kb_type)
     if current.strip():
         parsed_current = extract_rules_from_text(current)
         st.caption(f"路径：`{supplement_path}` · 共 **{len(parsed_current)}** 条规则")
@@ -1444,7 +1499,7 @@ def _render_knowledge_base_tab(cfg) -> None:
 
     if st.button("从数据库导出到编辑器", type="secondary", key="kb_export_btn"):
         try:
-            rules, md = export_rules_markdown(int(days), rule_type=kb_type)
+            rules, md = _kb_export_rules_markdown(int(days), kb_type)
             st.session_state.kb_review_md = md
             st.session_state.kb_parsed_preview = None
             st.session_state.kb_supplement_preview = None
@@ -1601,15 +1656,15 @@ def _render_knowledge_base_tab(cfg) -> None:
             else:
                 preview_rules = list(rules)
                 if merge_existing:
-                    existing = extract_rules_from_text(read_current_supplement(kb_type))
+                    existing = extract_rules_from_text(_kb_read_supplement_file(kb_type))
                     seen = set(existing)
                     preview_rules = list(existing)
                     for r in rules:
                         if r not in seen:
                             preview_rules.append(r)
                             seen.add(r)
-                st.session_state.kb_supplement_preview = build_supplement_markdown(
-                    preview_rules, rule_type=kb_type
+                st.session_state.kb_supplement_preview = _kb_build_supplement_markdown(
+                    preview_rules, kb_type
                 )
 
     preview_md = st.session_state.get("kb_supplement_preview")
@@ -1624,8 +1679,8 @@ def _render_knowledge_base_tab(cfg) -> None:
                 st.error("没有可写入的规则。请先导出、提纯选用，或保留编辑区至少一条规则。")
             else:
                 try:
-                    result = apply_rules_to_supplement(
-                        rules, merge_existing=merge_existing, rule_type=kb_type
+                    result = _kb_apply_rules_to_supplement(
+                        rules, merge_existing=merge_existing, kb_type=kb_type
                     )
                 except Exception as e:
                     st.error(f"写入失败：{core.redact_secrets(str(e), cfg)}")
