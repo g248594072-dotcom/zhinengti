@@ -14,6 +14,7 @@ echo "==> rsync code (保留 config/ 与 Dockerfile)"
 rsync -av --delete \
   --exclude '__pycache__' \
   --exclude '*.pyc' \
+  --exclude '.venv/' \
   --exclude 'config/' \
   --exclude 'qc_config.json' \
   --exclude '.env' \
