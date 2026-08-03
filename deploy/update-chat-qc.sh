@@ -23,6 +23,20 @@ rsync -av --delete \
 cp -f "$GIT_DIR/deploy/agent-qc/Dockerfile" "$BUILD_DIR/Dockerfile"
 cp -f "$GIT_DIR/deploy/agent-qc/.dockerignore" "$BUILD_DIR/.dockerignore"
 
+echo "==> verify delete-customer modules"
+for f in db.py delete_import_core.py delete_intelligence.py delete_context.py \
+         fetch_delete_daily.py daily_delete_job.py; do
+  if [ ! -f "$BUILD_DIR/$f" ]; then
+    echo "ERROR: missing $f after rsync" >&2
+    exit 1
+  fi
+done
+if ! grep -q 'def mark_sessions_as_deleted' "$BUILD_DIR/db.py"; then
+  echo "ERROR: db.py on server is outdated (missing mark_sessions_as_deleted)." >&2
+  echo "       Run: cd $GIT_DIR && git pull origin main" >&2
+  exit 1
+fi
+
 mkdir -p "$BUILD_DIR/config"
 for f in qc_config.json .env api-key.json import_deal_config.json; do
   if [ -f "$GIT_DIR/智能体/$f" ]; then
