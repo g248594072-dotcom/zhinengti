@@ -105,6 +105,9 @@ def _init_state():
         "last_low_df": None,
         "last_deep_df": None,
         "last_window_label": None,
+        "last_filter_df": None,
+        "last_filter_total": None,
+        "report_kind": "qc",
         # 聊天进度对比
         "compare_report_metas": None,
         "compare_rows": None,
@@ -280,6 +283,12 @@ def _get_selected_qc_agent_ids(member_groups: dict) -> list[int]:
     return selected
 
 
+def _select_qc_agent_group(member_ids):
+    """在 widget 回调中选中整组，允许更新已渲染过的客服复选框。"""
+    for uid in member_ids:
+        st.session_state[f"qc_agent_{uid}"] = True
+
+
 def _render_qc_agent_selector(member_groups: dict, member_id_to_name: dict) -> list[int]:
     from fetch_deal_salesmartly import sort_member_group_names
 
@@ -305,16 +314,27 @@ def _render_qc_agent_selector(member_groups: dict, member_id_to_name: dict) -> l
     seen_uids: set[int] = set()
     for gname in sort_member_group_names(member_groups.keys()):
         members = member_groups[gname]
-        with st.expander(f"{gname}（{len(members)} 人）", expanded=gname in ("一转高", "一转西")):
-            cols = st.columns(3)
-            col_i = 0
-            for uid, name in members:
-                if uid in seen_uids:
-                    continue
-                seen_uids.add(uid)
-                with cols[col_i % 3]:
-                    st.checkbox(name, key=f"qc_agent_{uid}")
-                col_i += 1
+        group_col, select_col = st.columns([8, 1])
+        with select_col:
+            st.button(
+                "全选本组",
+                key=f"qc_agents_select_group_{gname}",
+                on_click=_select_qc_agent_group,
+                args=([uid for uid, _ in members],),
+                help=f"选中「{gname}」中的所有客服，保留其他组的选择。",
+            )
+        with group_col:
+            with st.expander(f"{gname}（{len(members)} 人）", expanded=gname in ("一转高", "一转西")):
+                cols = st.columns(3)
+                col_i = 0
+                for uid, name in members:
+                    if uid in seen_uids:
+                        continue
+                    seen_uids.add(uid)
+                    with cols[col_i % 3]:
+                        st.checkbox(name, key=f"qc_agent_{uid}")
+                    col_i += 1
+
 
     return _get_selected_qc_agent_ids(member_groups)
 
@@ -399,6 +419,33 @@ def _qc_concurrency_control(cfg: dict) -> int:
     return int(st.session_state.get("qc_concurrency") or default_conc)
 
 
+def _execute_customer_filter(sessions, time_scope, window=None):
+    """生成仅四列的筛选报告，不进入 AI 质检、经验检索或质检结果入库。"""
+    df = core.build_customer_filter_dataframe(sessions)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="客户筛选", index=False)
+    scope_tag = _scope_label(time_scope)
+    st.session_state.update({
+        "last_filter_df": df,
+        "last_filter_total": len(sessions),
+        "last_stats": None,
+        "last_timing": None,
+        "last_deep_review": None,
+        "last_deep_timing": None,
+        "last_quality_df": None,
+        "last_low_df": None,
+        "last_deep_df": None,
+        "last_window_label": window["label"] if window else None,
+        "report_kind": "filter",
+        "report_sheet_counts": None,
+        "report_bytes": buf.getvalue(),
+        "report_name": f"客户筛选_{scope_tag}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+        "report_scope": scope_tag,
+    })
+    st.success(f"筛选完成：共 {len(sessions)} 通会话，保留发言超过 3 句的 {len(df)} 通，未使用 AI。")
+
+
 def _execute_qc_run(
     cfg: dict,
     sessions: list,
@@ -406,6 +453,7 @@ def _execute_qc_run(
     *,
     concurrency: int | None = None,
     window=None,
+    filter_only: bool = False,
 ):
     """执行质检主流程（Excel / API 共用）。"""
     if not sessions:
@@ -414,6 +462,10 @@ def _execute_qc_run(
 
     if window:
         st.caption(f"已按发言时间过滤（{window['label']}），共 {len(sessions)} 通会话")
+
+    if filter_only:
+        _execute_customer_filter(sessions, time_scope, window)
+        return
 
     enable_deal_context = st.session_state.get("enable_deal_context", True)
     enable_deep_review = st.session_state.get("enable_deep_review", False)
@@ -549,6 +601,9 @@ def _execute_qc_run(
     scope_tag = _scope_label(time_scope)
     st.session_state.report_name = f"质检报告_{scope_tag}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     st.session_state.report_scope = scope_tag
+    st.session_state.report_kind = "qc"
+    st.session_state.last_filter_df = None
+    st.session_state.last_filter_total = None
 
     done_msg = f"质检完成（{scope_tag}）"
     if deep_rows:
@@ -914,24 +969,37 @@ def _render_qc_tab(cfg):
                         st.error(f"解析失败：{e}")
 
     st.subheader("4. 开始质检")
-    concurrency = _qc_concurrency_control(cfg)
-    st.caption("SaleSmartly 拉数默认 10 路并行；AI 质检按上方并发数执行。")
-    st.toggle(
-        "启用深度复盘（客户发言>10条；常规质检全部完成后再执行）",
+    filter_only = st.toggle(
+        "仅筛选客户，不使用 AI（客户发言超过 3 句）",
         value=False,
-        key="enable_deep_review",
+        key="qc_filter_only",
     )
-    st.toggle(
-        "注入成交/删除经验参考（检索相似已成交与已删除案例，辅助质检判断）",
-        value=bool(cfg.get("deal_context_enabled", True)),
-        key="enable_deal_context",
-    )
-    st.checkbox(
-        "效果验证：首通会话对比「有/无成交参考」两次质检（多耗 1 次 API）",
-        value=False,
-        key="run_ab_validation",
-    )
-    start = st.button("开始质检", type="primary", key="qc_start_btn")
+    concurrency = None
+    if filter_only:
+        st.caption(
+            "按当前分析范围保留有效客户发言至少 4 条的会话（沿用现有计数规则，图片和单独的“1”不计入）。"
+            "不调用 AI；导出仅含客户发言时间、客户发言次数、客户名字、接待客服名字。"
+            "客户发言时间取范围内最近一次有效发言时间。"
+        )
+    else:
+        concurrency = _qc_concurrency_control(cfg)
+        st.caption("SaleSmartly 拉数默认 10 路并行；AI 质检按上方并发数执行。")
+        st.toggle(
+            "启用深度复盘（客户发言>10条；常规质检全部完成后再执行）",
+            value=False,
+            key="enable_deep_review",
+        )
+        st.toggle(
+            "注入成交/删除经验参考（检索相似已成交与已删除案例，辅助质检判断）",
+            value=bool(cfg.get("deal_context_enabled", True)),
+            key="enable_deal_context",
+        )
+        st.checkbox(
+            "效果验证：首通会话对比「有/无成交参考」两次质检（多耗 1 次 API）",
+            value=False,
+            key="run_ab_validation",
+        )
+    start = st.button("开始筛选" if filter_only else "开始质检", type="primary", key="qc_start_btn")
 
     if start:
         if source.startswith("SaleSmartly"):
@@ -983,6 +1051,7 @@ def _render_qc_tab(cfg):
                             time_scope,
                             concurrency=concurrency,
                             window=window,
+                            filter_only=filter_only,
                         )
         else:
             if not file_dfs:
@@ -1008,6 +1077,7 @@ def _render_qc_tab(cfg):
                         time_scope,
                         concurrency=concurrency,
                         window=window,
+                        filter_only=filter_only,
                     )
 
     # ---------- 成交客户心理学习 ----------
@@ -1058,6 +1128,17 @@ def _render_qc_tab(cfg):
             st.error(f"删除学习失败：{core.redact_secrets(str(e), cfg)}")
 
     # ---------- 统计与下载 ----------
+    if st.session_state.get("last_filter_df") is not None:
+        st.subheader("5. 筛选结果")
+        filtered = st.session_state.last_filter_df
+        total = st.session_state.last_filter_total
+        _show_stat_row([("总会话数", total), ("符合条件", len(filtered)), ("已排除", total - len(filtered))])
+        st.caption("客户发言时间为分析范围内最近一次有效发言时间；每通会话一行。")
+        if filtered.empty:
+            st.info("没有客户发言超过 3 句的会话，可下载仅包含表头的筛选表。")
+        else:
+            st.dataframe(filtered, use_container_width=True)
+
     if st.session_state.last_stats:
         st.subheader("5. 统计结果")
         s = st.session_state.last_stats
@@ -1162,7 +1243,7 @@ def _render_qc_tab(cfg):
                 sheet_desc += f" · 「{core.REPORT_SHEET_DEEP_REVIEW}」{counts[2]} 通"
             st.caption(f"报告含工作表：{sheet_desc}")
         st.download_button(
-            label="下载 Excel 质检报告",
+            label="下载 Excel 客户筛选表" if st.session_state.get("report_kind") == "filter" else "下载 Excel 质检报告",
             data=st.session_state.report_bytes,
             file_name=st.session_state.report_name,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

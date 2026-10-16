@@ -873,6 +873,27 @@ def count_roles(text):
     return count_valid_customer_segments(text), count_valid_agent_segments(text)
 
 
+CUSTOMER_FILTER_COLUMNS = ["客户发言时间", "客户发言次数", "客户名字", "接待客服名字"]
+
+
+def build_customer_filter_dataframe(sessions):
+    """按当前范围内的有效发言条数筛选（>3），不调用 AI；时间取最近一次有效发言。"""
+    rows = []
+    for session in sessions:
+        dialog = session.get("对话") or ""
+        count = count_valid_customer_segments(dialog)
+        if count <= 3:
+            continue
+        timestamps = _extract_customer_timestamps(dialog)
+        rows.append({
+            "客户发言时间": max(timestamps).strftime("%Y-%m-%d %H:%M:%S") if timestamps else "",
+            "客户发言次数": count,
+            "客户名字": session.get("联系人", ""),
+            "接待客服名字": session.get("接待成员", ""),
+        })
+    return pd.DataFrame(rows, columns=CUSTOMER_FILTER_COLUMNS)
+
+
 def _parse_speaker(line):
     """从对话行解析说话人。支持带/不带时间戳，中英文冒号。"""
     line = line.strip()
