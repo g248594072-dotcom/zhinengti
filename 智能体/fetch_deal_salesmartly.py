@@ -356,20 +356,19 @@ def _fetch_sessions_by_ids(
     def _fetch_one(session_id: str) -> Optional[dict]:
         if cancel_check and cancel_check():
             return None
-        try:
-            data = SaleSmartlyClient(config).get(
-                "/api/v2/get-session-list",
-                {
-                    "session_id": session_id,
-                    "session_status": "0",
-                    "page": "1",
-                    "page_size": "1",
-                },
-            )
-            items = data.get("list") or []
-            return items[0] if items else None
-        except Exception:
-            return None
+        # 空列表可能表示会话已关闭/删除，可用联系人信息继续拉聊天；
+        # 请求异常必须向上抛出，使每日任务保留该业务日等待重试。
+        data = SaleSmartlyClient(config).get(
+            "/api/v2/get-session-list",
+            {
+                "session_id": session_id,
+                "session_status": "0",
+                "page": "1",
+                "page_size": "1",
+            },
+        )
+        items = data.get("list") or []
+        return items[0] if items else None
 
     workers = min(DEFAULT_MAX_WORKERS, max(1, total))
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -520,7 +519,7 @@ def fetch_yesterday_deal_dataframe(
 
     messages_by_session = _fetch_messages_for_sessions(
         config,
-        list(session_by_id.keys()),
+        session_ids,
         on_progress=_msg_progress,
         cancel_check=cancel_check,
     )
@@ -548,7 +547,7 @@ def fetch_yesterday_deal_dataframe(
         if not message_text.strip():
             continue
 
-        sys_user_id = session.get("sys_user_id")
+        sys_user_id = session.get("sys_user_id") or contact.get("sys_user_id")
         try:
             agent_name = member_id_to_name.get(int(sys_user_id), "")
         except (TypeError, ValueError):
@@ -556,7 +555,8 @@ def fetch_yesterday_deal_dataframe(
         if not agent_name and sys_user_id not in (None, 0, "0"):
             agent_name = str(sys_user_id)
 
-        channel_name = CHANNEL_MAP.get(session.get("channel"), str(session.get("channel") or ""))
+        channel = session.get("channel") or contact.get("channel")
+        channel_name = CHANNEL_MAP.get(channel, str(channel or ""))
 
         rows.append({
             "联系人": contact_name,
@@ -578,6 +578,7 @@ def fetch_yesterday_deal_dataframe(
         "deal_contacts": len(deal_contacts),
         "sessions_with_messages": len(rows),
         "sessions": len(session_ids),
+        "session_details_missing": len(missing),
     }
     _log(f"完成：{len(rows)} 通有效会话")
     return df, meta

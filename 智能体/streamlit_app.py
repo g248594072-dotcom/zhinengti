@@ -1933,7 +1933,7 @@ def _render_delete_import_tab(cfg):
 
     st.caption(
         "将**已删除**客户聊天写入 MySQL 并**直接标记为已删除**（排除黑粉，不跑质检）。"
-        "支持每日自动从 SaleSmartly 拉取，也可手动上传 Excel。"
+        "每天北京时间 02:00 自动从 SaleSmartly 拉取、入库并分析，也可手动上传 Excel。"
     )
     st.info(f"导入目标数据库：**{target}**")
     _render_database_connection("delete_import")
@@ -2082,7 +2082,7 @@ def _render_deal_import_tab(cfg):
 
     st.caption(
         "将**已成交**客户聊天写入 MySQL 并**直接标记为已成交**（不跑质检）。"
-        "支持每日自动从 SaleSmartly 拉取，也可手动上传 Excel。"
+        "每天北京时间 02:00 自动从 SaleSmartly 拉取、入库并分析，也可手动上传 Excel。"
         "导入完成后可在下方启动成交心理学习。"
     )
     st.info(f"导入目标数据库：**{target}**（账号密码在服务器 `.env` 中配置）")
@@ -2098,9 +2098,7 @@ def _render_deal_import_tab(cfg):
         st.subheader("1. 从 SaleSmartly 拉取")
         st.markdown(
             f"规则：昨天日期标签下的客户，且访客标签含 **{' / '.join(deal_keywords)}**。"
-            " API 凭证放在 `智能体/api-key.json`（见 `api-key.json.example`）。"
-            " 服务器建议 **每天 02:00** 运行 `python fetch_deal_daily.py`，"
-            " **03:00** 由 `daily_job.py` 自动心理学习。"
+            " 每天**北京时间 02:00**自动拉取、入库，并逐位执行 AI 心理分析；也可在下方手动导入。"
         )
         col_a, col_b = st.columns(2)
         with col_a:

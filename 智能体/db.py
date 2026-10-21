@@ -667,19 +667,33 @@ def get_last_message(session_db_id: int) -> dict | None:
 def find_message_position_in_list(messages: list[dict], target_message: dict) -> int:
     target_content = normalize_text(target_message.get("content"))
     target_sender = normalize_text(target_message.get("sender_name"))
-
-    for i in range(len(messages) - 1, -1, -1):
+    def timestamp(message):
+        value = message.get("sent_at")
+        if not value:
+            return None
+        if isinstance(value, datetime):
+            return value
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return str(value)
+    target_time = timestamp(target_message)
+    for i in range(len(messages)-1, -1, -1):
         msg = messages[i]
-        msg_content = normalize_text(msg.get("content"))
-        msg_sender = normalize_text(msg.get("sender_name"))
-
-        if not msg_content:
+        if not target_content or normalize_text(msg.get("content")) != target_content:
             continue
-
-        if msg_content == target_content:
-            if not target_sender or not msg_sender or target_sender == msg_sender:
-                return i
-
+        sender = normalize_text(msg.get("sender_name"))
+        if target_sender and sender and target_sender != sender:
+            continue
+        sender_type = normalize_text(msg.get("sender_type"))
+        target_type = normalize_text(target_message.get("sender_type"))
+        if sender_type and target_type and sender_type != target_type:
+            continue
+        # 同一位客服在不同时间重复发送 Thanks，不代表新历史已经入库。
+        message_time = timestamp(msg)
+        if (target_time is not None or message_time is not None) and target_time != message_time:
+            continue
+        return i
     return -1
 
 
@@ -833,11 +847,10 @@ def append_new_messages_by_last_line(
 
         anchor = find_message_position_in_list(new_messages, last_db_message)
         if anchor == -1:
-            return {
-                "inserted_messages": 0,
-                "skipped": True,
-                "reason": "两边最后一条对不上，已跳过",
-            }
+            reason = "两边最后一条对不上，需要核对完整聊天历史"
+            record_import_conflict(original_session_id, customer_id, session_db_id,
+                                   source_file, last_db_message, raw_dialog or "", reason)
+            return {"inserted_messages": 0, "skipped": True, "conflict": True, "reason": reason}
 
         tail = new_messages[anchor + 1:]
         if not tail:
@@ -974,7 +987,12 @@ def upsert_sessions(sessions: list[dict], source_file: str | None = None) -> dic
                 "is_new_session": bool(chat_sess.get("created")),
             }
             skip_reason = append_result.get("reason") or ""
-            if skip_reason == "聊天记录为空":
+            if append_result.get("conflict"):
+                result["conflicts"] += 1
+                result["conflict_session_ids"].append(original_session_id)
+                detail["status"] = "失败"
+                detail["reason"] = skip_reason
+            elif skip_reason == "聊天记录为空":
                 detail["status"] = "失败"
                 detail["reason"] = skip_reason
             elif append_result.get("skipped") or skip_reason in (
