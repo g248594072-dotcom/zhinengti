@@ -53,13 +53,13 @@ def send_feishu_text(text: str, webhook_url: str | None = None) -> bool:
             return False
         data = resp.json()
         code = data.get("StatusCode", data.get("code"))
-        if code not in (0, None) and data.get("msg") not in ("success", "ok", None):
+        if code not in (0, "0"):
             logger.warning("飞书通知返回异常: %s", data)
             return False
         logger.info("飞书通知已发送")
         return True
     except Exception as e:
-        logger.warning("飞书通知发送失败: %s", e)
+        logger.warning("飞书通知发送失败（%s）", type(e).__name__)
         return False
 
 
@@ -294,3 +294,48 @@ def notify_fetch_delete_daily_result(
         result, failed=failed, log_path=log_path, log_tail_lines=log_tail_lines
     )
     return send_feishu_text(msg)
+
+
+def build_nightly_pipeline_report(result: dict) -> str:
+    """统一流程日报：只汇总运行结果，不包含聊天、密钥或原始日志。"""
+    status = {"success": "成功", "partial_failure": "部分失败", "failed": "失败"}.get(result.get("status"), "异常结束")
+    lines = ["【客户每日自动导入与分析报告】", f"状态：{status}",
+             f"业务日：{result.get('business_day', '未知')}",
+             "计划：每天北京时间 02:00 开始，完成后播报",
+             f"开始：{result.get('started_at', '未知')}",
+             f"结束：{result.get('finished_at', '未知')}"]
+    for kind, name in (("deal", "成交客户"), ("delete", "删除客户")):
+        step = (result.get("steps") or {}).get(kind)
+        lines.extend(["", f"【{name}】"])
+        if step is None:
+            lines.append("未执行")
+            continue
+        imports = step.get("imports") or []
+        if imports:
+            lines.append("拉取业务日：" + "、".join(item.get("day", "未知") for item in imports))
+            lines.append(f"入库成功 {sum(item.get('imported', 0) for item in imports)}，"
+                         f"重复/无更新跳过 {sum(item.get('unchanged', 0) for item in imports)}，"
+                         f"失败业务日 {sum(not item.get('ok') for item in imports)}")
+            lines.append(f"新增客户 {sum(item.get('customers_created', 0) for item in imports)}，"
+                         f"新增消息 {sum(item.get('messages_inserted', 0) for item in imports)}")
+        else:
+            lines.append("当日已完成入库，无需重复拉取")
+        learning = step.get("learning") or {}
+        if "total" in learning:
+            lines.append(f"AI分析：共 {learning.get('total', 0)}，成功 {learning.get('success', 0)}，失败 {learning.get('failed', 0)}")
+            lines.append(f"增量分析 {learning.get('incremental', 0)}，全量分析 {learning.get('full', 0)}")
+        else:
+            lines.append("AI分析未完成，保留待重试")
+        if "repair_attempted" in learning:
+            lines.append(f"历史继承补跑：本次尝试 {learning['repair_attempted']}，尚待 {learning.get('repair_remaining', '统计未完成')}")
+        if step.get("kb_pending") is not None:
+            lines.append(f"待审核合并至知识库：{step['kb_pending']} 组")
+    lines.extend(["", "删除筛选：业务日内有客户沟通，完整历史有效发言至少7条，排除黑粉。"])
+    if result.get("errors"):
+        lines.extend(["", "异常（保留待下次重试）："])
+        lines.extend("· " + core.redact_secrets(str(error))[:250] for error in result["errors"][:6])
+    return "\n".join(lines)
+
+
+def notify_nightly_pipeline_result(result: dict) -> bool:
+    return send_feishu_text(build_nightly_pipeline_report(result))

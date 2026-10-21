@@ -119,6 +119,9 @@ class TestNightlyPipeline(unittest.TestCase):
     def test_import_failure_does_not_advance_day_or_block_other_type(self):
         import qc_core, fetch_deal_daily, fetch_delete_daily, deal_intelligence, delete_intelligence
         with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            stack.enter_context(patch("feishu_notify.get_feishu_webhook_url",return_value=""))
+            stack.enter_context(patch("weekly_prompt_merge.count_rules_not_in_supplement",return_value={"pending":0}))
+            stack.enter_context(patch("weekly_prompt_merge.count_delete_rules_not_in_supplement",return_value={"pending":0}))
             stack.enter_context(patch.object(db,"init_db"))
             fetch_deal=stack.enter_context(patch.object(fetch_deal_daily,"run_fetch_deal_daily",return_value={"ok":False,"error":"API failure"}))
             fetch_delete=stack.enter_context(patch.object(fetch_delete_daily,"run_fetch_delete_daily",return_value={"ok":True,"summary":{}}))

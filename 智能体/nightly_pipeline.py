@@ -41,6 +41,21 @@ def _save_state(path, state):
     os.replace(temp, path)
 
 
+def _finish_run(state_path, state, result):
+    """先保留业务结果；播报失败不回滚入库或再次运行AI。"""
+    from feishu_notify import get_feishu_webhook_url, notify_nightly_pipeline_result
+    _save_state(state_path, state)
+    try:
+        configured = bool(get_feishu_webhook_url())
+        sent = notify_nightly_pipeline_result(result) if configured else False
+        result["notification"] = {"status": "sent" if sent else ("failed" if configured else "not_configured")}
+    except Exception as exc:
+        logger.warning("每日飞书播报异常（%s）", type(exc).__name__)
+        result["notification"] = {"status": "failed"}
+    _save_state(state_path, state)
+    return result
+
+
 @contextmanager
 def pipeline_lock(config_dir):
     """OS释放锁，异常退出不留下需要人工清理的锁。"""
@@ -91,8 +106,7 @@ def run_pipeline(*, target_day=None, repair_limit=50, config_dir=None):
         except Exception as exc:
             result.update(status="partial_failure", finished_at=datetime.now(BEIJING).isoformat(),
                           errors=[format_database_error(exc)])
-            _save_state(state_path, state)
-            return result
+            return _finish_run(state_path, state, result)
         jobs = {
             "deal": (run_fetch_deal_daily, get_unanalyzed_deal_customers, analyze_unlearned_deals),
             "delete": (run_fetch_delete_daily, get_unanalyzed_delete_customers, analyze_unlearned_deletes),
@@ -111,17 +125,21 @@ def run_pipeline(*, target_day=None, repair_limit=50, config_dir=None):
                     ok = bool(fetched.get("ok")) and not failed
                     item = {"day": str(day), "ok": ok,
                             "customers_created": summary.get("customers_created", 0),
-                            "messages_inserted": summary.get("messages_inserted", 0)}
+                            "messages_inserted": summary.get("messages_inserted", 0),
+                            "imported": settlement.get("success_count", summary.get("session_count", 0)),
+                            "unchanged": settlement.get("skipped_count", summary.get("unchanged_sessions", 0))}
                     if not ok:
                         item["error"] = core.redact_secrets(fetched.get("error") or "部分会话导入失败或冲突，请查看导入日志")
                     step["imports"].append(item)
                     if not ok:
-                        errors.append(f"{kind} {day} 导入失败")
+                        errors.append(f"{kind} {day} 导入失败：{item['error']}")
                         break
                     imported[kind] = str(day)
                     _save_state(state_path, state)
                 except Exception as exc:
-                    errors.append(f"{kind} {day}: {core.redact_secrets(str(exc))}")
+                    message = core.redact_secrets(str(exc))
+                    step["imports"].append({"day": str(day), "ok": False, "error": message})
+                    errors.append(f"{kind} {day}: {message}")
                     break
             _save_state(state_path, state)
         try:
@@ -135,21 +153,29 @@ def run_pipeline(*, target_day=None, repair_limit=50, config_dir=None):
                 try:
                     # 快照只处理一遍，失败留到下次；新客户全部处理，历史继承每类每晚最多50位。
                     customers, repairs = select_learning_customers(pending(limit=1000000), repair_limit)
+                    learning = result["steps"][kind]["learning"]
+                    learning["repair_attempted"] = sum(bool(c.get("needs_repair")) for c in customers)
                     learned = learn(cfg, customers=customers)
-                    result["steps"][kind]["learning"] = {
+                    learning.update({
                         key: learned.get(key, 0) for key in ("total", "success", "failed", "full", "incremental")
-                    }
+                    })
                     result["steps"][kind]["learning"]["repair_remaining"] = sum(bool(c.get("needs_repair")) for c in pending(limit=1000000))
                     if learned.get("failed"):
                         errors.append(f"{kind} {learned['failed']} 位客户分析失败，等待下次重试")
+                        errors.extend(f"{kind}: {core.redact_secrets(str(error), cfg)[:250]}" for error in (learned.get("errors") or [])[:3])
                 except Exception as exc:
                     errors.append(f"{kind} 分析失败: {core.redact_secrets(str(exc), cfg)}")
                 _save_state(state_path, state)
         result.update(status="partial_failure" if errors else "success",
                       finished_at=datetime.now(BEIJING).isoformat(), errors=errors)
-        _save_state(state_path, state)
+        try:
+            from weekly_prompt_merge import count_rules_not_in_supplement, count_delete_rules_not_in_supplement
+            for kind, counter in (("deal", count_rules_not_in_supplement), ("delete", count_delete_rules_not_in_supplement)):
+                result["steps"][kind]["kb_pending"] = counter().get("pending", 0)
+        except Exception:
+            logger.warning("知识库待审核统计暂不可用")
         logger.info("NIGHTLY_RESULT %s", json.dumps(result, ensure_ascii=False))
-        return result
+        return _finish_run(state_path, state, result)
 
 
 def main():
@@ -178,7 +204,14 @@ def main():
         print("NIGHTLY_ALREADY_RUNNING")
         return 0
     except Exception as exc:
-        logger.error("NIGHTLY_FAILED %s", core.redact_secrets(str(exc)))
+        error = core.redact_secrets(str(exc))
+        logger.error("NIGHTLY_FAILED %s", error)
+        try:
+            from feishu_notify import notify_nightly_pipeline_result
+            notify_nightly_pipeline_result({"status": "failed", "business_day": args.date or str(previous_day()),
+                                           "finished_at": datetime.now(BEIJING).isoformat(), "errors": [error]})
+        except Exception:
+            logger.warning("异常播报失败，请查看服务器日志")
         return 1
 
 

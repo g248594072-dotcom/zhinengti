@@ -10,3 +10,5 @@
 持久状态：`/opt/tool-platform/agent-qc/config/nightly_pipeline_state.json`；OS文件锁防止统一任务并发。定时任务日志：`journalctl -u chat-qc-nightly.service`；检查：`systemctl list-timers chat-qc-nightly.timer`。只检查、不导入、不调用AI：`docker exec chat-qc python /app/nightly_pipeline.py --check`。手动执行完整任务：`systemctl start chat-qc-nightly.service`。
 
 旧cron备份位于config/schedule-backups/。停止自动执行：`systemctl disable --now chat-qc-nightly.timer`。代码部署仍使用update-chat-qc.sh，不会覆盖持久配置和知识库。
+
+流程完成后沿用config/.env中的FEISHU_WEBHOOK_URL，发送一条成交/删除统一汇总（含导入成功/跳过、实际AI分析成功/失败、历史补跑、待审核规则及异常）。数据库初始化失败和任务异常也播报。发送状态保存在last_run.notification，通知失败不会重新导入或重复调用AI。
