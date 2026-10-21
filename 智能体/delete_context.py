@@ -80,7 +80,17 @@ def _load_all_deletes() -> list[dict]:
     try:
         from db import list_delete_analyses
 
-        return list_delete_analyses(limit=300)
+        import json
+        records = list_delete_analyses(limit=300)
+        def independent(record):
+            raw = record.get("raw_result") or {}
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except (ValueError, TypeError):
+                    return False
+            return isinstance(raw, dict) and raw.get("_学习模式") != "继承跳过"
+        return [r for r in records if independent(r)]
     except Exception as e:
         logger.warning("加载删除分析失败: %s", e)
         return []

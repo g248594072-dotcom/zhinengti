@@ -1135,48 +1135,52 @@ def mark_deal_customers_from_qc(results: list[dict]) -> dict:
 # 成交心理分析
 # ---------------------------------------------------------------------------
 
-def count_unanalyzed_deal_customers() -> int:
-    """已成交且尚未做过心理学习的客户数（按客户去重）。"""
+def _pending_learning_query(kind: str, *, count: bool = False) -> str:
+    if kind not in ("deal", "delete"):
+        raise ValueError("invalid learning type")
+    status = "已成交" if kind == "deal" else "已删除"
+    event_at = "deal_at" if kind == "deal" else "deleted_at"
+    # 表名仅取上方白名单；继承分析需重做，但不会删除原结果。
+    repair = "COALESCE(JSON_UNQUOTE(JSON_EXTRACT(da.raw_result, '$.\"_学习模式\"')), '') = '继承跳过'"
+    fields = "COUNT(*)" if count else f"""c.id AS customer_id,
+        (SELECT s.id FROM chat_sessions s WHERE s.customer_id=c.id
+         ORDER BY s.updated_at DESC, s.id DESC LIMIT 1) AS session_id,
+        c.original_session_id, c.contact_name, c.sales_name, c.status, c.{event_at},
+        CASE WHEN da.id IS NOT NULL AND {repair} THEN 1 ELSE 0 END AS needs_repair"""
+    sql = f"""SELECT {fields} FROM customers c
+        LEFT JOIN {kind}_analysis da ON da.customer_id=c.id
+        WHERE c.status='{status}' AND (
+            da.id IS NULL OR TRIM(COALESCE(da.recommended_agent_rules,''))=''
+            OR {repair}
+            OR EXISTS (SELECT 1 FROM chat_sessions s WHERE s.customer_id=c.id
+                       AND s.updated_at > da.analyzed_at)
+        )"""
+    if kind == "delete":
+        sql += " AND EXISTS (SELECT 1 FROM chat_sessions s WHERE s.customer_id=c.id AND s.message_count_customer > 6)"
+    if not count:
+        sql += f" ORDER BY needs_repair ASC, c.{event_at} DESC, c.id DESC LIMIT :lim"
+    return sql
+
+
+def _count_pending_learning(kind: str) -> int:
     init_db()
-    engine = get_engine()
-    with engine.connect() as conn:
-        row = conn.execute(
-            text("""
-                SELECT COUNT(*)
-                FROM customers c
-                LEFT JOIN deal_analysis da ON da.customer_id = c.id
-                WHERE c.status = '已成交'
-                  AND da.id IS NULL
-            """),
-        ).scalar()
-    return int(row or 0)
+    with get_engine().connect() as conn:
+        return int(conn.execute(text(_pending_learning_query(kind, count=True))).scalar() or 0)
+
+
+def _get_pending_learning(kind: str, limit: int) -> list[dict]:
+    init_db()
+    with get_engine().connect() as conn:
+        rows = conn.execute(text(_pending_learning_query(kind)), {"lim": max(1, int(limit))}).fetchall()
+        return [_row_to_dict(r) for r in rows]
+
+
+def count_unanalyzed_deal_customers() -> int:
+    return _count_pending_learning("deal")
 
 
 def get_unanalyzed_deal_customers(limit: int = 20) -> list[dict]:
-    init_db()
-    engine = get_engine()
-    with engine.connect() as conn:
-        rows = conn.execute(
-            text("""
-                SELECT c.id AS customer_id,
-                       (SELECT s.id FROM chat_sessions s
-                        WHERE s.customer_id = c.id
-                        ORDER BY s.updated_at DESC LIMIT 1) AS session_id,
-                       c.original_session_id,
-                       c.contact_name,
-                       c.sales_name,
-                       c.status,
-                       c.deal_at
-                FROM customers c
-                LEFT JOIN deal_analysis da ON da.customer_id = c.id
-                WHERE c.status = '已成交'
-                  AND da.id IS NULL
-                ORDER BY c.deal_at DESC, c.updated_at DESC
-                LIMIT :lim
-            """),
-            {"lim": limit},
-        ).fetchall()
-        return [_row_to_dict(r) for r in rows]
+    return _get_pending_learning("deal", limit)
 
 
 def get_customer_full_dialog(customer_id: int) -> str:
@@ -1464,46 +1468,11 @@ def mark_deleted_customers_from_qc(results: list[dict]) -> dict:
 
 
 def count_unanalyzed_delete_customers() -> int:
-    init_db()
-    engine = get_engine()
-    with engine.connect() as conn:
-        row = conn.execute(
-            text("""
-                SELECT COUNT(*)
-                FROM customers c
-                LEFT JOIN delete_analysis da ON da.customer_id = c.id
-                WHERE c.status = '已删除'
-                  AND da.id IS NULL
-            """),
-        ).scalar()
-    return int(row or 0)
+    return _count_pending_learning("delete")
 
 
 def get_unanalyzed_delete_customers(limit: int = 20) -> list[dict]:
-    init_db()
-    engine = get_engine()
-    with engine.connect() as conn:
-        rows = conn.execute(
-            text("""
-                SELECT c.id AS customer_id,
-                       (SELECT s.id FROM chat_sessions s
-                        WHERE s.customer_id = c.id
-                        ORDER BY s.updated_at DESC LIMIT 1) AS session_id,
-                       c.original_session_id,
-                       c.contact_name,
-                       c.sales_name,
-                       c.status,
-                       c.deleted_at
-                FROM customers c
-                LEFT JOIN delete_analysis da ON da.customer_id = c.id
-                WHERE c.status = '已删除'
-                  AND da.id IS NULL
-                ORDER BY c.deleted_at DESC, c.updated_at DESC
-                LIMIT :lim
-            """),
-            {"lim": limit},
-        ).fetchall()
-        return [_row_to_dict(r) for r in rows]
+    return _get_pending_learning("delete", limit)
 
 
 _DELETE_FIELD_MAP = {

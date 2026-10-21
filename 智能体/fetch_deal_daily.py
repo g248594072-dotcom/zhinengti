@@ -24,16 +24,19 @@ if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
 _LOG_DIR = os.path.join(_APP_DIR, "logs")
-os.makedirs(_LOG_DIR, exist_ok=True)
+def _configure_logging():
+    os.makedirs(_LOG_DIR, exist_ok=True)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(os.path.join(_LOG_DIR, "fetch_deal_daily.log"), encoding="utf-8"),
-    ],
-)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(os.path.join(_LOG_DIR, "fetch_deal_daily.log"), encoding="utf-8"),
+        ],
+    )
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -154,6 +157,7 @@ def run_fetch_deal_daily(
 
 
 def main() -> int:
+    _configure_logging()
     parser = argparse.ArgumentParser(description="每日拉取昨日成交客户并入库")
     parser.add_argument("--dry-run", action="store_true", help="只拉取预览，不写数据库")
     parser.add_argument("--date", type=str, default="", help="指定业务日 YYYY-MM-DD（默认昨天）")

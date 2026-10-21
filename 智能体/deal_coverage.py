@@ -93,11 +93,9 @@ def assess_deal_learning_need(dialog: str, cfg: dict) -> dict:
     """阶段一：检索已有分析并判断 skip / incremental / full。"""
     from deal_context import find_similar_deals
 
-    skip_score = float(cfg.get("deal_learn_skip_score", 6.0))
     incremental_min = float(cfg.get("deal_learn_incremental_score", 3.0))
     incremental_enabled = cfg.get("deal_learn_incremental_enabled", True)
     ref_limit = int(cfg.get("deal_learn_ref_limit", 3))
-    use_llm = bool(cfg.get("deal_learn_coverage_llm", False))
 
     supplement = load_supplement_excerpt()
     similar = find_similar_deals(
@@ -116,34 +114,13 @@ def assess_deal_learning_need(dialog: str, cfg: dict) -> dict:
         "ref_compact": build_compact_deal_refs(similar, limit=ref_limit),
     }
 
-    if best and best_score >= skip_score and deal_record_has_rules(best):
-        action = "skip"
-        reason = (
-            f"与「{best.get('contact_name') or best.get('original_session_id')}」"
-            f"高度相似（匹配度 {best_score}），已有分析可覆盖"
-        )
-    elif (
-        use_llm
-        and best
-        and best_score >= max(skip_score - 2.0, incremental_min)
-        and deal_record_has_rules(best)
-    ):
-        llm_ok, llm_reason = _llm_coverage_check(dialog, similar, supplement, cfg)
-        if llm_ok:
-            action = "skip"
-            reason = llm_reason or "知识库已覆盖该类型客户"
-        elif incremental_enabled and similar and best_score >= incremental_min:
-            action = "incremental"
-            reason = llm_reason or "与已有案例有差异，增量更新"
-        else:
-            action = "full"
-            reason = llm_reason or "无足够参考，全量复盘"
-    elif incremental_enabled and similar and best_score >= incremental_min:
+    # 相似案例只提供参考；任何客户都必须依据自己的聊天实际调用 AI。
+    if incremental_enabled and similar and best_score >= incremental_min:
         action = "incremental"
-        reason = f"与已有案例部分相似（匹配度 {best_score}），增量对比后更新知识"
+        reason = f"参考相似案例（匹配度 {best_score}），独立分析当前客户聊天"
     else:
         action = "full"
-        reason = "无足够相似的已有分析，执行全量复盘"
+        reason = "依据当前客户聊天执行全量复盘"
 
     base.update({"action": action, "reason": reason})
     return base

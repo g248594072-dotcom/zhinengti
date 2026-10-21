@@ -1082,7 +1082,7 @@ def _render_qc_tab(cfg):
 
     # ---------- 成交客户心理学习 ----------
     st.subheader("成交客户学习")
-    st.caption("对已成交且尚未分析的客户做心理学习：先比对已有案例，相似则跳过，否则增量/全量 AI 复盘。")
+    st.caption("每天北京时间 02:00 自动导入并分析。每位客户依据自己的聊天独立复盘；历史继承记录及新增聊天会重新分析。")
     if st.button("分析新增成交客户", type="secondary", key="analyze_deals_btn"):
         try:
             result = _run_deal_learning_with_progress(cfg, 20)
@@ -1105,7 +1105,7 @@ def _render_qc_tab(cfg):
 
     # ---------- 删除客户流失复盘 ----------
     st.subheader("删除客户学习")
-    st.caption("对已删除且尚未分析的客户做流失复盘：自动注入相似删除案例与同顾虑成交对比，提炼规避规则。")
+    st.caption("每天北京时间 02:00 自动拉取并入库：前一天有客户沟通、完整历史有效发言至少 7 条，排除黑粉；每位客户独立 AI 复盘。")
     if st.button("分析新增删除客户", type="secondary", key="analyze_deletes_btn"):
         try:
             result = _run_delete_learning_with_progress(cfg, 20)
@@ -1402,7 +1402,7 @@ def _render_deal_learn_prompt(cfg, default_limit: int) -> None:
     st.subheader("5. 是否开始心理学习？")
     st.markdown(
         "分析单位是 **每位成交客户**（使用该客户**全部聊天记录**做一次复盘），"
-        "不是按 Excel 行或单段对话逐条分析；已学习过的客户不会重复分析。"
+        "不是按 Excel 行或单段对话逐条分析；聊天未变化且已独立分析的客户不会重复分析；历史继承记录会补跑。"
     )
 
     if pending <= 0:
@@ -1863,7 +1863,7 @@ def _render_delete_learn_prompt(cfg, default_limit: int) -> None:
     st.subheader("5. 是否开始流失复盘？")
     st.markdown(
         "分析单位是 **每位删除客户**（使用该客户**全部聊天记录**做一次复盘），"
-        "已学习过的客户不会重复分析。"
+        "聊天未变化且已独立分析的客户不会重复分析；历史继承记录会补跑。"
     )
     if pending <= 0:
         st.success("当前所有删除客户均已完成流失复盘，无需再分析。")

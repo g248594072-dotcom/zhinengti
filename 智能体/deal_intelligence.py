@@ -16,7 +16,6 @@ from db import (
 )
 from deal_coverage import (
     assess_deal_learning_need,
-    inherited_analysis_from_ref,
 )
 
 logger = logging.getLogger(__name__)
@@ -100,13 +99,10 @@ def analyze_deal_customer(customer: dict, cfg: dict) -> dict:
         action = assessment.get("action") or "full"
         reason = assessment.get("reason") or ""
 
+        # 兼容旧调用方返回 skip，但不再复制其他客户的分析。
         if action == "skip":
-            best = assessment.get("best_match") or {}
-            result = inherited_analysis_from_ref(best, reason)
-            save_deal_analysis(customer_id, session_id, result)
-            return result
+            action = "incremental" if assessment.get("best_match") else "full"
 
-        # 阶段二：注入参考案例后再学习
         if action == "incremental":
             result = _run_incremental_learn(dialog, assessment, cfg)
         else:
@@ -122,6 +118,11 @@ def analyze_deal_customer(customer: dict, cfg: dict) -> dict:
                     result.get("成交阶段总结") or ""
                 )
 
+        if not isinstance(result, dict) or not str(
+            result.get("智能体判断规则") or result.get("recommended_agent_rules") or ""
+        ).strip():
+            return {"_错误": "AI 未返回有效判断规则，保留原记录等待重试", "_学习模式": "失败"}
+        result["_学习模式"] = "增量更新" if action == "incremental" else "全量复盘"
         save_deal_analysis(customer_id, session_id, result)
         return result
     except Exception as e:
@@ -147,6 +148,8 @@ def analyze_unlearned_deals(
     cfg: dict,
     limit: int = 20,
     on_progress=None,
+    *,
+    customers: list[dict] | None = None,
 ) -> dict:
     """分析尚未做过成交心理学习的客户。
 
@@ -154,7 +157,8 @@ def analyze_unlearned_deals(
     mode: skipped / incremental / full / failed
     """
     init_db()
-    customers = get_unanalyzed_deal_customers(limit=limit)
+    if customers is None:
+        customers = get_unanalyzed_deal_customers(limit=limit)
     total = len(customers)
     success = 0
     failed = 0
