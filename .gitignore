@@ -31,3 +31,10 @@ build/
 
 # 超大原始文档（超过 GitHub 100MB 限制）
 原始文档/大力丸销售标准化思维和回复 (2).docx
+
+# 含密钥的本地配置备份
+.env.*
+!.env.example
+qc_config.json.*
+api-key.json.*
+import_deal_config.json.*

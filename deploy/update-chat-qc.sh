@@ -27,7 +27,13 @@ rsync -av --delete \
   --exclude '.venv/' \
   --exclude 'config/' \
   --exclude 'qc_config.json' \
-  --exclude '.env' \
+  --include '.env.example' \
+  --exclude '.env*' \
+  --exclude '*.bak' \
+  --exclude '*.save' \
+  --exclude 'qc_config.json.*' \
+  --exclude 'api-key.json.*' \
+  --exclude 'import_deal_config.json.*' \
   --exclude 'api-key.json' \
   --exclude 'import_deal_config.json' \
   "$GIT_DIR/智能体/" "$BUILD_DIR/"

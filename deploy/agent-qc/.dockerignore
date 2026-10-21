@@ -5,3 +5,12 @@ __pycache__/
 qc_config.json
 api-key.json
 .git
+
+# 本机/服务器配置备份也可能含密钥
+.env*
+!.env.example
+*.bak
+*.save
+qc_config.json.*
+api-key.json.*
+import_deal_config.json.*
