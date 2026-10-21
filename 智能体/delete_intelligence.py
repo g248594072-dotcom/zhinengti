@@ -9,6 +9,7 @@ from datetime import date
 import qc_core as core
 from db import (
     get_customer_full_dialog,
+    analysis_text,
     get_unanalyzed_delete_customers,
     init_db,
     save_delete_analysis,
@@ -203,12 +204,12 @@ def analyze_unlearned_deletes(
             else:
                 full += 1
 
-            churn = (result.get("流失模式分类") or result.get("churn_pattern") or "").strip()
+            churn = analysis_text(result.get("流失模式分类") or result.get("churn_pattern") or "")
             if churn:
                 key = churn.split("/")[0].split("、")[0][:20]
                 churn_stats[key] = churn_stats.get(key, 0) + 1
 
-            rule = (result.get("智能体判断规则") or result.get("recommended_agent_rules") or "").strip()
+            rule = analysis_text(result.get("智能体判断规则") or result.get("recommended_agent_rules") or "")
             if rule:
                 learned_items.append({
                     "contact_name": name,

@@ -390,7 +390,7 @@ def get_engine() -> Engine:
         try:
             _ENGINE = create_engine(
                 url,
-                pool_pre_ping=True,
+                pool_pre_ping=True, hide_parameters=True,
                 pool_recycle=1800,
                 pool_size=5,
                 max_overflow=10,
@@ -1247,9 +1247,18 @@ _DEAL_FIELD_MAP = {
 }
 
 
+def analysis_text(value) -> str:
+    """AI文本字段也可能返回数组/对象，转换为无损JSON后再绑定到TEXT列。"""
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, default=str)
+    return str(value).strip()
+
+
 def save_deal_analysis(customer_id: int, session_id: int | None, analysis: dict) -> None:
     init_db()
-    fields = {db_col: analysis.get(cn_key) or analysis.get(db_col) or ""
+    fields = {db_col: analysis_text(analysis.get(cn_key) or analysis.get(db_col) or "")
               for cn_key, db_col in _DEAL_FIELD_MAP.items()}
     raw = analysis if isinstance(analysis, dict) else {}
 
@@ -1494,7 +1503,7 @@ _DELETE_FIELD_MAP = {
 
 def save_delete_analysis(customer_id: int, session_id: int | None, analysis: dict) -> None:
     init_db()
-    fields = {db_col: analysis.get(cn_key) or analysis.get(db_col) or ""
+    fields = {db_col: analysis_text(analysis.get(cn_key) or analysis.get(db_col) or "")
               for cn_key, db_col in _DELETE_FIELD_MAP.items()}
     raw = analysis if isinstance(analysis, dict) else {}
 

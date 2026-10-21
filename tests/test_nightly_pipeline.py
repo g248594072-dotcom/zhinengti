@@ -56,6 +56,18 @@ class TestIndependentLearning(unittest.TestCase):
                 self.assertEqual(result["action"],"incremental")
 
 
+class TestStructuredAnalysisFields(unittest.TestCase):
+    def test_structured_ai_fields_bind_to_database_without_losing_contents(self):
+        engine=create_engine("sqlite://")
+        value=["当前客户原话", {"证据": "聊天时间点"}]
+        with engine.begin() as conn:
+            conn.execute(text("CREATE TABLE analysis(value TEXT)"))
+            conn.execute(text("INSERT INTO analysis VALUES(:value)"), {"value":db.analysis_text(value)})
+            saved=conn.execute(text("SELECT value FROM analysis")).scalar_one()
+            self.assertEqual(json.loads(saved),value)
+        engine.dispose()
+
+
 class TestPendingQueries(unittest.TestCase):
     def test_actual_query_selects_inherited_blank_and_changed_but_not_unchanged(self):
         engine=create_engine("sqlite://")

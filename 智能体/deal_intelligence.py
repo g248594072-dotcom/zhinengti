@@ -9,6 +9,7 @@ from datetime import date
 import qc_core as core
 from db import (
     get_customer_full_dialog,
+    analysis_text,
     get_unanalyzed_deal_customers,
     init_db,
     save_deal_analysis,
@@ -187,7 +188,7 @@ def analyze_unlearned_deals(
             else:
                 full += 1
 
-            rule = (result.get("智能体判断规则") or result.get("recommended_agent_rules") or "").strip()
+            rule = analysis_text(result.get("智能体判断规则") or result.get("recommended_agent_rules") or "")
             if rule:
                 learned_items.append({
                     "contact_name": name,
