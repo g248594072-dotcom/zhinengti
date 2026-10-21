@@ -1526,6 +1526,27 @@ def _kb_apply_rules_to_supplement(
         return apply_rules_to_supplement(rules, merge_existing=merge_existing)
 
 
+def _render_database_connection(key: str) -> None:
+    from db import mysql_connection_info, test_mysql_connection
+
+    info = mysql_connection_info()
+    target = f"{info['host'] or '未配置主机'}:{info['port']}/{info['database'] or '未配置库名'}"
+    with st.expander("数据库连接检查与配置", expanded=False):
+        st.write(f"当前连接目标：**{target}**")
+        st.caption(f"读取配置：{info['env_path']}（{'文件存在' if info['env_exists'] else '文件不存在'}）；进程 MYSQL_* 环境变量优先。")
+        if info["process_overrides"]:
+            st.caption("进程环境变量覆盖项：" + "、".join(info["process_overrides"]))
+        if info["host"] in ("127.0.0.1", "localhost", "::1"):
+            st.caption("Docker 中的 127.0.0.1 指向当前网页容器。若 MySQL 在其他容器或宿主机，请填写网页容器可访问的数据库地址。")
+        if st.button("测试数据库连接 / 重新连接", key=f"{key}_db_test"):
+            with st.spinner("正在测试数据库连接…"):
+                try:
+                    test_mysql_connection()
+                    st.success("MySQL 连接成功，可以重试导出或导入。")
+                except RuntimeError as exc:
+                    st.error(str(exc))
+
+
 def _render_knowledge_base_tab(cfg) -> None:
     """全局知识库：从 DB 导出规则 → 在线审核 → AI 提纯 → 写入 supplement。"""
     from rule_refine import (
@@ -1568,6 +1589,7 @@ def _render_knowledge_base_tab(cfg) -> None:
         st.info("暂无全局知识库文件；完成下方「导出 → 审核 → 写入」后将自动创建。")
 
     st.subheader("2. 从数据库导出待审核规则")
+    _render_database_connection("kb")
     st.markdown(
         f"从 MySQL `{table_name}` 读取最近 N 天内**不重复**的「智能体判断规则」，"
         "生成待审核 Markdown。"
@@ -1587,10 +1609,9 @@ def _render_knowledge_base_tab(cfg) -> None:
             _kb_clear_refine_state()
             st.success(f"已加载 **{len(rules)}** 条不重复规则（最近 {int(days)} 天）")
             st.rerun()
-        except RuntimeError as e:
-            st.error(f"数据库不可用：{e}")
         except Exception as e:
-            st.error(f"导出失败：{core.redact_secrets(str(e), cfg)}")
+            from db import format_database_error
+            st.error(f"导出失败：{format_database_error(e)}")
 
     st.subheader("3. 审核与编辑")
     st.text_area(
@@ -1915,10 +1936,11 @@ def _render_delete_import_tab(cfg):
         "支持每日自动从 SaleSmartly 拉取，也可手动上传 Excel。"
     )
     st.info(f"导入目标数据库：**{target}**")
+    _render_database_connection("delete_import")
 
     source = st.radio(
         "数据来源",
-        ["SaleSmartly API（昨日删除）", "上传 Excel"],
+        ["SaleSmartly API（按沟通时间筛选）", "上传 Excel"],
         horizontal=True,
         key="delete_import_source",
     )
@@ -1926,15 +1948,29 @@ def _render_delete_import_tab(cfg):
     if source.startswith("SaleSmartly"):
         st.subheader("1. 从 SaleSmartly 拉取")
         st.markdown(
-            f"规则：昨天日期标签下的客户，且访客标签含 **{' / '.join(delete_keywords)}**，"
-            f"**排除黑粉**。建议 **02:15** 运行 `fetch_delete_daily.py`，"
-            f"**03:30** 由 `daily_delete_job.py` 自动流失复盘。"
+            f"规则：先拉取含 **{' / '.join(delete_keywords)}** 的删除标签客户，**排除黑粉**，"
+            "再拉聊天记录，保留选定时间范围内**有客户有效沟通**，且完整历史客户有效发言 **超过 6 条（至少 7 条）** 的会话。"
+            "符合条件的客户导入完整聊天，供后续流失复盘；不依赖昨天或日期标签。"
         )
+        today = datetime.now().date()
+        date_start_col, date_end_col = st.columns(2)
+        with date_start_col:
+            start_date = st.date_input("沟通开始日期", value=today - timedelta(days=1), key="delete_window_start_date")
+            start_time = st.time_input("沟通开始时间", value=datetime.min.time(), key="delete_window_start_time")
+        with date_end_col:
+            end_date = st.date_input("沟通结束日期", value=today, key="delete_window_end_date")
+            end_time = st.time_input("沟通结束时间（不含）", value=datetime.min.time(), key="delete_window_end_time")
+        window_start = datetime.combine(start_date, start_time)
+        window_end = datetime.combine(end_date, end_time)
+        valid_window = window_start < window_end
+        st.caption("范围包含开始时刻，不包含结束时刻。沿用有效发言计数规则，图片和单独的“1”不计入。")
+        if not valid_window:
+            st.warning("结束时间必须晚于开始时间。")
         col_a, col_b = st.columns(2)
         with col_a:
-            preview_api = st.button("预览昨日删除（不写库）", key="delete_api_preview")
+            preview_api = st.button("预览范围内删除客户（不写库）", key="delete_api_preview", disabled=not valid_window)
         with col_b:
-            import_api = st.button("拉取昨日删除并导入", type="primary", key="delete_api_import")
+            import_api = st.button("拉取范围内删除客户并导入", type="primary", key="delete_api_import", disabled=not valid_window)
 
         if preview_api or import_api:
             from fetch_cancel import FetchCancelledError
@@ -1945,6 +1981,8 @@ def _render_delete_import_tab(cfg):
             try:
                 api_result = run_fetch_delete_daily(
                     dry_run=preview_api,
+                    window_start=window_start,
+                    window_end=window_end,
                     on_progress=on_fetch_progress,
                     cancel_check=cancel_check,
                 )
@@ -1958,13 +1996,19 @@ def _render_delete_import_tab(cfg):
             if api_result is not None:
                 meta = api_result.get("meta") or {}
                 st.caption(
-                    f"业务日 **{api_result.get('target_day')}** · 删除 **{meta.get('delete_contacts', 0)}** 人 · "
-                    f"有效会话 **{meta.get('sessions_with_messages', 0)}**"
+                    f"沟通时间：**{api_result.get('window_label')}** · 删除标签客户 **{meta.get('delete_contacts', 0)}** 人 · "
+                    f"符合条件 **{meta.get('sessions_with_messages', 0)}** 通 · "
+                    f"无客户沟通排除 **{meta.get('skipped_no_customer_speech', 0)}** 通 · "
+                    f"历史不足 7 条排除 **{meta.get('skipped_insufficient_speech', 0)}** 通"
                 )
                 if api_result.get("error") and not api_result.get("ok"):
                     st.error(api_result["error"])
                 elif preview_api:
                     st.success("预览完成（未写入数据库）。")
+                    if api_result.get("preview"):
+                        st.dataframe(pd.DataFrame(api_result["preview"]), use_container_width=True)
+                    else:
+                        st.info("所选范围内没有符合条件的删除客户。")
                 elif api_result.get("ok"):
                     summary = api_result.get("summary") or {}
                     st.session_state.delete_last_import_summary = summary

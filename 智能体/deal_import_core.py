@@ -49,19 +49,15 @@ def save_import_config(cfg: dict) -> None:
 
 
 def get_mysql_target_label(cfg: dict | None = None) -> str:
-    cfg = cfg or load_import_config()
-    db_name = (cfg.get("mysql_database") or "").strip()
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(os.path.join(_CONFIG_DIR, ".env"))
-        host = os.getenv("MYSQL_HOST", "127.0.0.1")
-        port = os.getenv("MYSQL_PORT", "3306")
-        env_db = os.getenv("MYSQL_DATABASE", "")
-        if env_db and db_name and env_db != db_name:
-            return f"{host}:{port}/{env_db}（.env）⚠ 与配置库名 {db_name} 不一致"
-        return f"{host}:{port}/{env_db or db_name or 'customer_ai'}"
-    except Exception:
-        return db_name or "customer_ai"
+    from db import mysql_connection_info
+
+    info = mysql_connection_info()
+    db_name = ((cfg or {}).get("mysql_database") or "").strip()
+    actual = info["database"]
+    target = f"{info['host'] or '未配置主机'}:{info['port']}/{actual or '未配置库名'}"
+    if actual and db_name and actual != db_name:
+        target += f" ⚠ 与导入配置库名 {db_name} 不一致"
+    return target
 
 
 def empty_summary() -> dict:

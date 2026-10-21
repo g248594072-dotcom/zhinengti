@@ -15,9 +15,9 @@ import time
 from datetime import datetime
 from typing import Any, Callable, TypeVar
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 from sqlalchemy import create_engine, text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, URL
 from sqlalchemy.exc import SQLAlchemyError
 
 import qc_core as core
@@ -249,30 +249,84 @@ _CREATE_TABLES_SQL = [
 ]
 
 
-def _load_env():
-    if os.path.isfile(_ENV_PATH):
-        load_dotenv(_ENV_PATH)
-    else:
-        load_dotenv()
+def load_mysql_settings() -> dict:
+    """每次读取当前配置，进程环境变量优先于指定配置目录中的 .env；不污染 os.environ。"""
+    values = dotenv_values(_ENV_PATH, interpolate=False) if os.path.isfile(_ENV_PATH) else {}
+    defaults = {"MYSQL_PORT": "3306", "MYSQL_CHARSET": "utf8mb4"}
+    return {
+        key: str(os.environ.get(key, values.get(key) or defaults.get(key, "")))
+        for key in ("MYSQL_HOST", "MYSQL_PORT", "MYSQL_USER", "MYSQL_PASSWORD", "MYSQL_DATABASE", "MYSQL_CHARSET")
+    }
 
 
-def _mysql_url() -> str:
-    _load_env()
-    host = os.getenv("MYSQL_HOST", "127.0.0.1")
-    port = os.getenv("MYSQL_PORT", "3306")
-    user = os.getenv("MYSQL_USER", "root")
-    password = os.getenv("MYSQL_PASSWORD", "")
-    database = os.getenv("MYSQL_DATABASE", "customer_ai")
-    charset = os.getenv("MYSQL_CHARSET", "utf8mb4")
-    if not password and not os.path.isfile(_ENV_PATH):
+def mysql_connection_info() -> dict:
+    """可展示的连接目标和配置来源，不含用户名、密码。"""
+    cfg = load_mysql_settings()
+    return {
+        "host": cfg["MYSQL_HOST"], "port": cfg["MYSQL_PORT"],
+        "database": cfg["MYSQL_DATABASE"], "env_path": _ENV_PATH,
+        "env_exists": os.path.isfile(_ENV_PATH),
+        "in_container": os.path.isfile("/.dockerenv"),
+        "process_overrides": [key for key in cfg if key in os.environ],
+    }
+
+
+def _mysql_url() -> URL:
+    cfg = load_mysql_settings()
+    missing = [key for key in ("MYSQL_HOST", "MYSQL_USER", "MYSQL_DATABASE") if not cfg[key].strip()]
+    if missing:
         raise RuntimeError(
-            f"未找到 .env 配置文件：{_ENV_PATH}\n"
-            "请复制 .env.example 为 .env 并填写 MySQL 连接信息。"
+            f"MySQL 配置缺少 {', '.join(missing)}。请在 {_ENV_PATH} 或容器环境变量中填写；"
+            "不会自动使用 127.0.0.1。"
         )
-    return (
-        f"mysql+pymysql://{user}:{password}@{host}:{port}/{database}"
-        f"?charset={charset}"
+    try:
+        port = int(cfg["MYSQL_PORT"])
+        if not 1 <= port <= 65535:
+            raise ValueError
+    except ValueError:
+        raise RuntimeError("MYSQL_PORT 必须为 1 至 65535 的整数。") from None
+    return URL.create(
+        "mysql+pymysql", username=cfg["MYSQL_USER"], password=cfg["MYSQL_PASSWORD"],
+        host=cfg["MYSQL_HOST"].strip(), port=port, database=cfg["MYSQL_DATABASE"].strip(),
+        query={"charset": cfg["MYSQL_CHARSET"] or "utf8mb4"},
     )
+
+
+def format_database_error(exc: BaseException) -> str:
+    """把常见连接故障转换成不泄露账号密码的可操作提示。"""
+    info = mysql_connection_info()
+    target = f"{info['host'] or '未配置主机'}:{info['port']}/{info['database'] or '未配置库名'}"
+    orig = getattr(exc, "orig", exc)
+    args = getattr(orig, "args", ())
+    code = args[0] if args and isinstance(args[0], int) else None
+    if code in (2003, 2006, 2013, 2055) or isinstance(exc, OSError):
+        msg = f"无法连接 MySQL：{target}。请确认数据库已启动、主机和端口正确且应用可访问。"
+        if info["host"] in ("127.0.0.1", "localhost", "::1"):
+            msg += (
+                "如果网页在 Docker 容器中，这个地址指向网页容器自身。"
+                "MySQL 在另一容器时填写同一 Docker 网络中的 MySQL 服务名；"
+                "在宿主机时填写容器可访问的宿主机地址。"
+            )
+    elif code == 1045:
+        msg = f"MySQL 拒绝登录：{target}。请核对账号密码及该账号对网页所在主机的访问授权。"
+    elif code == 1049:
+        msg = f"MySQL 数据库不存在：{info['database']}。请核对 MYSQL_DATABASE。"
+    elif isinstance(exc, RuntimeError):
+        msg = str(exc)
+    else:
+        msg = f"数据库操作失败：{target}（MySQL 错误码：{code or '未知'}）。请查看服务器日志。"
+    return f"{msg} 配置文件：{info['env_path']}；进程 MYSQL_* 环境变量优先。"
+
+
+def test_mysql_connection() -> dict:
+    """重建连接池并执行只读 SELECT 1，不建表、不修改业务数据。"""
+    reset_engine()
+    try:
+        with get_engine().connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception as exc:
+        raise RuntimeError(format_database_error(exc)) from None
+    return mysql_connection_info()
 
 
 def _is_transient_db_error(exc: BaseException) -> bool:
@@ -294,7 +348,8 @@ def _is_transient_db_error(exc: BaseException) -> bool:
 
 def reset_engine() -> None:
     """丢弃连接池（连接断开时用于重建）。"""
-    global _ENGINE
+    global _ENGINE, _DB_READY
+    _DB_READY = False
     if _ENGINE is not None:
         try:
             _ENGINE.dispose()
@@ -328,29 +383,33 @@ def with_db_retry(fn: Callable[..., T], *args, **kwargs) -> T:
 
 def get_engine() -> Engine:
     global _ENGINE
+    url = _mysql_url()
+    if _ENGINE is not None and _ENGINE.url != url:
+        reset_engine()
     if _ENGINE is None:
         try:
             _ENGINE = create_engine(
-                _mysql_url(),
+                url,
                 pool_pre_ping=True,
                 pool_recycle=1800,
                 pool_size=5,
                 max_overflow=10,
                 connect_args={
-                    "connect_timeout": 30,
+                    "connect_timeout": 8,
                     "read_timeout": 120,
                     "write_timeout": 120,
                 },
                 json_serializer=lambda obj: json.dumps(obj, ensure_ascii=False),
             )
         except Exception as e:
-            raise RuntimeError(f"MySQL 连接失败：{e}") from e
+            raise RuntimeError(format_database_error(e)) from None
     return _ENGINE
 
 
 def init_db() -> None:
     """自动创建全部业务表（进程内只执行一次 DDL）。"""
     global _DB_READY
+    get_engine()  # 检测配置变更，必要时重置旧连接池与建表标记。
     if _DB_READY:
         return
 

@@ -8,7 +8,7 @@ from typing import Any
 import qc_core as core
 from sqlalchemy import text
 
-from db import get_engine, init_db, normalize_session_id, upsert_sessions
+from db import get_engine, init_db, normalize_session_id, upsert_sessions, format_database_error
 from deal_import_core import (
     _dedupe_sessions,
     empty_summary,
@@ -55,11 +55,23 @@ def mark_sessions_as_deleted_from_list(sessions: list[dict]) -> int:
     return mark_sessions_as_deleted(sessions)
 
 
+def _filter_delete_sessions(sessions: list[dict]) -> tuple[list[dict], list[dict]]:
+    kept, skipped = [], []
+    for session in sessions:
+        if core.count_valid_customer_segments(session.get("对话") or "") > 6:
+            kept.append(session)
+        else:
+            skipped.append({
+                "session_id": session.get("会话ID", ""), "contact_name": session.get("联系人", ""),
+                "status": "跳过", "reason": "客户有效发言不足 7 条",
+            })
+    return kept, skipped
+
+
 def import_delete_from_file_dfs(
     file_dfs: list[tuple[str, Any]],
     column_map: dict | None = None,
 ) -> tuple[list[dict], dict]:
-    init_db()
     all_sessions: list[dict] = []
     summary = empty_delete_summary()
 
@@ -88,6 +100,13 @@ def import_delete_from_file_dfs(
             summary["file_stats"].append(file_stat)
             continue
 
+        part, skipped = _filter_delete_sessions(part)
+        summary["session_details"].extend(skipped)
+        if not part:
+            file_stat["status"] = "跳过"
+            file_stat["reason"] = "客户有效发言不足 7 条"
+            summary["file_stats"].append(file_stat)
+            continue
         r = upsert_sessions(part, source_file=name)
         for k in ("customers_created", "customers_updated", "sessions_created",
                   "sessions_updated", "messages_inserted", "conflicts",
@@ -102,7 +121,7 @@ def import_delete_from_file_dfs(
     sessions = _dedupe_sessions(all_sessions)
     summary["session_count"] = len(sessions)
     summary["file_count"] = len(file_dfs)
-    marked = mark_sessions_as_deleted(sessions)
+    marked = mark_sessions_as_deleted(sessions) if sessions else 0
     summary["marked_deleted"] = marked
     return sessions, finalize_import_summary(summary)
 
@@ -159,11 +178,17 @@ def execute_delete_import(
         if d.get("error"):
             out["summary"]["errors"].append(f"{d.get('file')}: {d['error']}")
 
+    sessions, skipped = _filter_delete_sessions(sessions)
     out["sessions"] = sessions
     out["summary"]["session_count"] = len(sessions)
+    out["summary"]["session_details"].extend(skipped)
 
     if not sessions:
-        out["error"] = "没有可导入的会话，请检查 Excel 是否含「会话ID」和「消息内容」列。"
+        if skipped:
+            out["ok"] = True
+            out["summary"] = finalize_import_summary(out["summary"])
+        else:
+            out["error"] = "没有可导入的会话，请检查 Excel 是否含「会话ID」和「消息内容」列。"
         return out
 
     if dry_run:
@@ -174,7 +199,7 @@ def execute_delete_import(
         _, summary = import_delete_from_file_dfs(file_dfs, column_map=column_map)
         out["summary"] = summary
     except Exception as e:
-        out["error"] = str(e)
+        out["error"] = format_database_error(e)
         return out
 
     if run_analyze:

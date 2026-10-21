@@ -8,7 +8,7 @@ import os
 from datetime import datetime, timedelta
 
 import requests
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
 import qc_core as core
 
@@ -22,16 +22,9 @@ _MAX_MESSAGE_CHARS = 3800
 _DEFAULT_LOG_TAIL_LINES = 30
 
 
-def _load_env() -> None:
-    if os.path.isfile(_ENV_PATH):
-        load_dotenv(_ENV_PATH)
-    else:
-        load_dotenv()
-
-
 def get_feishu_webhook_url() -> str:
-    _load_env()
-    return (os.getenv("FEISHU_WEBHOOK_URL") or "").strip()
+    values = dotenv_values(_ENV_PATH, interpolate=False) if os.path.isfile(_ENV_PATH) else {}
+    return (os.getenv("FEISHU_WEBHOOK_URL") or values.get("FEISHU_WEBHOOK_URL") or "").strip()
 
 
 def send_feishu_text(text: str, webhook_url: str | None = None) -> bool:
